@@ -29,6 +29,13 @@ git clone https://github.com/scoutah/slam_rl.git
 cd slam_rl
 ```
 
+Setting up environment variables
+```bash
+# this command appends the ros2 setup script and the turtlebot model to the  ~/.bashrc, which automatically executes the commands in every new terminal (recommended) (also execute the command if you have one of the commands already)
+
+grep -qxF 'source /opt/ros/jazzy/setup.bash' ~/.bashrc || echo 'source /opt/ros/jazzy/setup.bash' >> ~/.bashrc; grep -qxF 'export TURTLEBOT3_MODEL=burger' ~/.bashrc || echo 'export TURTLEBOT3_MODEL=burger' >> ~/.bashrc
+```
+
 Starting the simulation
 ```bash
 # build files creation
@@ -44,3 +51,5 @@ Controlling the simulation via keyboard (in a seperat terminal)
 # control simulation via keyboard
 ros2 run turtlebot3_teleop teleop_keyboard
 ```
+
+ALWAYS terminate the simulation with 'CTRL + C'

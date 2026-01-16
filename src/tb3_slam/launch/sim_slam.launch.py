@@ -1,5 +1,5 @@
 from launch import LaunchDescription
-from launch.actions import IncludeLaunchDescription
+from launch.actions import IncludeLaunchDescription, TimerAction
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import PathJoinSubstitution
 from launch_ros.substitutions import FindPackageShare
@@ -26,7 +26,12 @@ def generate_launch_description():
         launch_arguments={'use_sim_time': 'true'}.items()
     )
 
+    turtlebot3_cartographer_launch_delayed = TimerAction(
+        period=5.0,
+        actions=[turtlebot3_cartographer_launch]
+    )
+
     return LaunchDescription([
         turtlebot3_gazebo_launch,
-        turtlebot3_cartographer_launch
+        turtlebot3_cartographer_launch_delayed
     ])

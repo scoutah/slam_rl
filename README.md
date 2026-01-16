@@ -32,7 +32,7 @@ cd slam_rl
 Starting the simulation
 ```bash
 # build files creation
-colcon build
+colcon build # ONLY EVER USE THAT COMMAND IN 'slam_rl/', NOT IN slam_rl/src or other subdirectories
 source install/setup.bash
 
 # launch simulation

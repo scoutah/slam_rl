@@ -35,9 +35,12 @@ class FrontierExplorer(Node):
         grid = np.array(msg.data, dtype=int).reshape((height, width))
         self.get_logger().info(f'map size: {grid.shape}')
 
-        # unknown = np.sum(grid == -1)
-        # free = np.sum(grid == 0)
-        # occupied = np.sum(grid == 100)
+        unknown = np.sum(grid == -1)
+        free = np.sum((FREE_LOWER_BOUND <= grid) & (grid <= FREE_UPPER_BOUND))
+        uncertain = np.sum((FRONTIER_LOWER_BOUND <= grid) & (grid <= FRONTIER_UPPER_BOUND))
+        occupied = np.sum((OCCUPIED_LOWER_BOUND <= grid) & (grid <= OCCUPIED_UPPER_BOUND))
+
+        self.get_logger().info(f'unknown: {unknown}, free: {free}, uncertain: {uncertain}, occupied: {occupied}')
 
         # currently only finds hard cuts between -1 and 0, but most cells are ranged between 0 and 100
         frontier_cells = find_frontiers(grid)

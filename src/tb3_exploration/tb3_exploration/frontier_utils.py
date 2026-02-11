@@ -2,6 +2,13 @@ import math
 
 import numpy as np
 
+FREE_LOWER_BOUND = 0
+FREE_UPPER_BOUND = 25
+FRONTIER_LOWER_BOUND = 26
+FRONTIER_UPPER_BOUND = 75
+OCCUPIED_LOWER_BOUND = 76
+OCCUPIED_UPPER_BOUND = 100
+
 
 def find_frontiers(data) -> list[tuple[int, int]]:
     """
@@ -22,10 +29,10 @@ def find_frontiers(data) -> list[tuple[int, int]]:
 
     for i in range(rows):
         for j in range(cols):
-            if data[i, j] == -1:
+            if data[i, j] == -1 or FRONTIER_LOWER_BOUND <= data[i, j] <= FRONTIER_UPPER_BOUND:  # 25 - 75 widens range of possible frontiers (instead of using -1)
                 for dr, dc in neighbors:
                     nr, nc = i + dr, j + dc
-                    if 0 <= nr < rows and 0 <= nc < cols and 0 <= data[nr, nc] <= 25:  # 25 widens range of possible free cells (instead of using 0)
+                    if 0 <= nr < rows and 0 <= nc < cols and FREE_LOWER_BOUND <= data[nr, nc] <= FREE_UPPER_BOUND:  # 25 widens range of possible free cells (instead of using 0)
                         frontiers.append((i, j))
                         break
     return frontiers
@@ -88,7 +95,7 @@ def find_centroid(frontier: list[tuple[int, int]], grid: np.ndarray) -> tuple[in
 
     # 2) Prüfe, ob centroid auf free (0) liegt
     r, c = centroid
-    if 0 <= r < rows and 0 <= c < cols and grid[r, c] == 0:
+    if 0 <= r < rows and 0 <= c < cols and FREE_LOWER_BOUND <= grid[r, c] <= FREE_UPPER_BOUND:
         return centroid
 
     # 3) Finde nächstgelegene Zelle in Frontier
@@ -105,7 +112,7 @@ def find_centroid(frontier: list[tuple[int, int]], grid: np.ndarray) -> tuple[in
     neighbors = [(-1, 0), (1, 0), (0, -1), (0, 1)]
     for dr, dc in neighbors:
         nr, nc = fr + dr, fc + dc
-        if 0 <= nr < rows and 0 <= nc < cols and grid[nr, nc] == 0:
+        if 0 <= nr < rows and 0 <= nc < cols and FREE_LOWER_BOUND <= grid[nr, nc] <= FREE_UPPER_BOUND:
             return (nr, nc)
 
     # 5) kein freier Nachbar gefunden

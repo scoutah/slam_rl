@@ -53,3 +53,11 @@ ros2 run turtlebot3_teleop teleop_keyboard
 ```
 
 ALWAYS terminate the simulation with 'CTRL + C'
+
+## Testing your code
+
+````bash
+colcon build
+colcon test # optional: --packages-select <your-package>
+colcon test-result --verbose
+```

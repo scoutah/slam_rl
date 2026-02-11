@@ -46,13 +46,22 @@ source install/setup.bash
 ros2 launch tb3_slam sim_slam.launch.py
 ```
 
+ATTENTION:
+- ALWAYS terminate the simulation with 'CTRL + C'
+- In a new terminal always: "source install/setup.bash"
+
 Controlling the simulation via keyboard (in a seperat terminal)
 ```bash
 # control simulation via keyboard
 ros2 run turtlebot3_teleop teleop_keyboard
 ```
 
-ALWAYS terminate the simulation with 'CTRL + C'
+or 
+
+Starting the frontier-based exploration (in a seperat terminal)
+```bash
+ros2 run tb3_exploration frontier_explorer
+```
 
 ## Testing your code
 

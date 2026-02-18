@@ -1,6 +1,7 @@
-from setuptools import find_packages, setup
-import os
 from glob import glob
+import os
+
+from setuptools import find_packages, setup
 
 package_name = 'tb3_slam'
 
@@ -27,7 +28,7 @@ setup(
     },
     entry_points={
         'console_scripts': [
-          
+            'cmd_vel_relay = tb3_slam.cmd_vel_relay:main',
         ],
     },
 )

@@ -1,6 +1,6 @@
 import random
 import os
-from typing import List
+from typing import List, Tuple
 
 
 def generate_random_world(file_path: str) -> bool:
@@ -14,6 +14,7 @@ def generate_random_world(file_path: str) -> bool:
         world_size = 5.0
         wall_height = 1.2
         wall_thickness = 0.15
+        keep_out_half = 0.5
 
         half = world_size / 2.0
 
@@ -44,6 +45,27 @@ def generate_random_world(file_path: str) -> bool:
 
         walls: List[str] = []
 
+        def intersects_keep_out(
+            center_x: float,
+            center_y: float,
+            size_x: float,
+            size_y: float,
+        ) -> bool:
+            half_x = size_x / 2.0
+            half_y = size_y / 2.0
+
+            min_x = center_x - half_x
+            max_x = center_x + half_x
+            min_y = center_y - half_y
+            max_y = center_y + half_y
+
+            return not (
+                max_x <= -keep_out_half
+                or min_x >= keep_out_half
+                or max_y <= -keep_out_half
+                or min_y >= keep_out_half
+            )
+
         # --------------------------------------------------
         # 1. Outer boundary (closed box room)
         # --------------------------------------------------
@@ -54,75 +76,116 @@ def generate_random_world(file_path: str) -> bool:
         walls.append(create_wall("outer_west", -half, 0, wall_thickness, world_size))
 
         # --------------------------------------------------
-        # 2. Interior room-like structure
+        # 2. Interior room-like structure (connected BSP split)
         # --------------------------------------------------
 
-        num_divisions = random.randint(2, 3)
-        door_width = 0.8
+        rooms: List[Tuple[float, float, float, float]] = [(-half, half, -half, half)]
 
-        for i in range(num_divisions):
+        target_splits = random.randint(3, 5)
+        min_room_span = 1.4
+        door_width = 0.9
+        min_segment = 0.25
 
-            horizontal = random.random() < 0.5
+        split_count = 0
+        attempts = 0
+        max_attempts = 200
 
-            if horizontal:
-                y = random.uniform(-half * 0.6, half * 0.6)
+        while split_count < target_splits and attempts < max_attempts:
+            attempts += 1
 
-                door_center = random.uniform(-half * 0.5, half * 0.5)
+            splittable = []
+            for idx, (xmin, xmax, ymin, ymax) in enumerate(rooms):
+                span_x = xmax - xmin
+                span_y = ymax - ymin
 
-                left_length = (door_center - door_width/2) - (-half)
-                right_length = (half) - (door_center + door_width/2)
+                can_vertical = span_x >= (2 * min_room_span + wall_thickness)
+                can_horizontal = span_y >= (2 * min_room_span + wall_thickness)
 
-                if left_length > 0.3:
-                    walls.append(
-                        create_wall(
-                            f"hwall_{i}_left",
-                            -half + left_length/2,
-                            y,
-                            left_length,
-                            wall_thickness
-                        )
-                    )
+                if can_vertical or can_horizontal:
+                    splittable.append((idx, can_vertical, can_horizontal))
 
-                if right_length > 0.3:
-                    walls.append(
-                        create_wall(
-                            f"hwall_{i}_right",
-                            door_center + door_width/2 + right_length/2,
-                            y,
-                            right_length,
-                            wall_thickness
-                        )
-                    )
+            if not splittable:
+                break
 
+            room_idx, can_vertical, can_horizontal = random.choice(splittable)
+            xmin, xmax, ymin, ymax = rooms.pop(room_idx)
+
+            if can_vertical and can_horizontal:
+                orientation = random.choice(["vertical", "horizontal"])
+            elif can_vertical:
+                orientation = "vertical"
             else:
-                x = random.uniform(-half * 0.6, half * 0.6)
+                orientation = "horizontal"
 
-                door_center = random.uniform(-half * 0.5, half * 0.5)
+            split_success = False
 
-                bottom_length = (door_center - door_width/2) - (-half)
-                top_length = (half) - (door_center + door_width/2)
+            for _ in range(40):
+                if orientation == "vertical":
+                    split_x = random.uniform(xmin + min_room_span, xmax - min_room_span)
 
-                if bottom_length > 0.3:
-                    walls.append(
-                        create_wall(
-                            f"vwall_{i}_bottom",
-                            x,
-                            -half + bottom_length/2,
-                            wall_thickness,
-                            bottom_length
-                        )
+                    door_center = random.uniform(
+                        ymin + door_width / 2.0,
+                        ymax - door_width / 2.0,
                     )
 
-                if top_length > 0.3:
-                    walls.append(
-                        create_wall(
-                            f"vwall_{i}_top",
-                            x,
-                            door_center + door_width/2 + top_length/2,
-                            wall_thickness,
-                            top_length
-                        )
+                    bottom_len = (door_center - door_width / 2.0) - ymin
+                    top_len = ymax - (door_center + door_width / 2.0)
+
+                    segments = []
+                    if bottom_len >= min_segment:
+                        segments.append((split_x, ymin + bottom_len / 2.0, wall_thickness, bottom_len))
+                    if top_len >= min_segment:
+                        segments.append((split_x, door_center + door_width / 2.0 + top_len / 2.0, wall_thickness, top_len))
+
+                    if not segments:
+                        continue
+
+                    if any(intersects_keep_out(x, y, sx, sy) for x, y, sx, sy in segments):
+                        continue
+
+                    for seg_idx, (x, y, sx, sy) in enumerate(segments):
+                        walls.append(create_wall(f"split_{split_count}_v_{seg_idx}", x, y, sx, sy))
+
+                    rooms.append((xmin, split_x, ymin, ymax))
+                    rooms.append((split_x, xmax, ymin, ymax))
+                    split_success = True
+
+                else:
+                    split_y = random.uniform(ymin + min_room_span, ymax - min_room_span)
+
+                    door_center = random.uniform(
+                        xmin + door_width / 2.0,
+                        xmax - door_width / 2.0,
                     )
+
+                    left_len = (door_center - door_width / 2.0) - xmin
+                    right_len = xmax - (door_center + door_width / 2.0)
+
+                    segments = []
+                    if left_len >= min_segment:
+                        segments.append((xmin + left_len / 2.0, split_y, left_len, wall_thickness))
+                    if right_len >= min_segment:
+                        segments.append((door_center + door_width / 2.0 + right_len / 2.0, split_y, right_len, wall_thickness))
+
+                    if not segments:
+                        continue
+
+                    if any(intersects_keep_out(x, y, sx, sy) for x, y, sx, sy in segments):
+                        continue
+
+                    for seg_idx, (x, y, sx, sy) in enumerate(segments):
+                        walls.append(create_wall(f"split_{split_count}_h_{seg_idx}", x, y, sx, sy))
+
+                    rooms.append((xmin, xmax, ymin, split_y))
+                    rooms.append((xmin, xmax, split_y, ymax))
+                    split_success = True
+
+                if split_success:
+                    split_count += 1
+                    break
+
+            if not split_success:
+                rooms.append((xmin, xmax, ymin, ymax))
 
         # --------------------------------------------------
         # 3. Assemble SDF

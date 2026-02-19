@@ -21,7 +21,7 @@ def generate_random_world(file_path: str) -> bool:
                         size_x: float, size_y: float) -> str:
             return f"""
     <model name="{name}">
-      <static>true</static>
+      <static>1</static>
       <pose>{x} {y} {wall_height/2} 0 0 0</pose>
       <link name="link">
         <collision name="collision">
@@ -128,35 +128,59 @@ def generate_random_world(file_path: str) -> bool:
         # 3. Assemble SDF
         # --------------------------------------------------
 
-        sdf_content = f"""<?xml version="1.0"?>
-<sdf version="1.6">
+        sdf_content = f"""
+        <?xml version="1.0"?>
+<sdf version="1.8">
   <world name="default">
+    <physics type="ode">
+      <real_time_update_rate>1000.0</real_time_update_rate>
+      <max_step_size>0.001</max_step_size>
+      <real_time_factor>1</real_time_factor>
+      <ode>
+        <solver>
+          <type>quick</type>
+          <iters>150</iters>
+          <precon_iters>0</precon_iters>
+          <sor>1.400000</sor>
+          <use_dynamic_moi_rescaling>1</use_dynamic_moi_rescaling>
+        </solver>
+        <constraints>
+          <cfm>0.00001</cfm>
+          <erp>0.2</erp>
+          <contact_max_correcting_vel>2000.000000</contact_max_correcting_vel>
+          <contact_surface_layer>0.01000</contact_surface_layer>
+        </constraints>
+      </ode>
+    </physics>
+    <plugin
+      filename="gz-sim-physics-system"
+      name="gz::sim::systems::Physics">
+    </plugin>
+    <plugin
+      filename="gz-sim-user-commands-system"
+      name="gz::sim::systems::UserCommands">
+    </plugin>
+    <plugin
+      filename="gz-sim-scene-broadcaster-system"
+      name="gz::sim::systems::SceneBroadcaster">
+    </plugin>
+    <plugin
+      filename="gz-sim-sensors-system"
+      name="gz::sim::systems::Sensors">
+      <render_engine>ogre2</render_engine>
+    </plugin>
+    <plugin
+      filename="gz-sim-imu-system"
+      name="gz::sim::systems::Imu">
+    </plugin>
 
-  <plugin filename="gz-sim-physics-system" name="gz::sim::systems::Physics"/>
-  <plugin filename="gz-sim-user-commands-system" name="gz::sim::systems::UserCommands"/>
-  <plugin filename="gz-sim-scene-broadcaster-system" name="gz::sim::systems::SceneBroadcaster"/>
-  <plugin filename="gz-sim-sensors-system" name="gz::sim::systems::Sensors">
-    <render_engine>ogre2</render_engine>
-  </plugin>
-  <plugin filename="gz-sim-imu-system" name="gz::sim::systems::Imu"/>
+    <include>
+      <uri>https://fuel.gazebosim.org/1.0/OpenRobotics/models/Ground Plane</uri>
+    </include>
 
-  <include>
-    <uri>https://fuel.gazebosim.org/1.0/OpenRobotics/models/Ground Plane</uri>
-  </include>
-
-  <include>
-    <uri>https://fuel.gazebosim.org/1.0/OpenRobotics/models/Sun</uri>
-  </include>
-
-  <scene>
-    <shadows>false</shadows>
-  </scene>
-
-  <physics type="ode">
-    <real_time_update_rate>1000.0</real_time_update_rate>
-    <max_step_size>0.001</max_step_size>
-    <real_time_factor>1</real_time_factor>
-  </physics>
+    <include>
+      <uri>https://fuel.gazebosim.org/1.0/OpenRobotics/models/Sun</uri>
+    </include>
 
   <!-- Walls -->
   {''.join(walls)}

@@ -41,12 +41,12 @@ def generate_launch_description():
         launch_arguments={'gz_args': ['-r -s -v2 ', world_file], 'on_exit_shutdown': 'true'}.items()
     )
 
-    # gzclient_cmd = IncludeLaunchDescription(
-    #     PythonLaunchDescriptionSource(
-    #         os.path.join(ros_gz_sim, 'launch', 'gz_sim.launch.py')
-    #     ),
-    #     launch_arguments={'gz_args': '-g -v2 ', 'use_sim_time': use_sim_time}.items()
-    # )
+    gzclient_cmd = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            os.path.join(ros_gz_sim, 'launch', 'gz_sim.launch.py')
+        ),
+        launch_arguments={'gz_args': '-g -v2 ', 'use_sim_time': use_sim_time}.items()
+    )
 
     robot_state_publisher_cmd = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
@@ -69,11 +69,6 @@ def generate_launch_description():
             'y_pose': '0.0',
             'use_sim_time': use_sim_time
         }.items()
-    )
-
-    spawn_turtlebot_cmd_delayed = TimerAction(
-        period=2.0,
-        actions=[spawn_turtlebot_cmd]
     )
 
     set_env_vars_resources = AppendEnvironmentVariable(
@@ -136,8 +131,8 @@ def generate_launch_description():
 
     return LaunchDescription([
         gzserver_cmd,
-        # gzclient_cmd,
-        spawn_turtlebot_cmd_delayed,
+        gzclient_cmd,
+        spawn_turtlebot_cmd,
         robot_state_publisher_delayed,
         set_env_vars_resources,
         turtlebot3_cartographer_launch_delayed,

@@ -29,6 +29,7 @@ setup(
     entry_points={
         'console_scripts': [
             'cmd_vel_relay = tb3_slam.cmd_vel_relay:main',
+            'episode_manager = tb3_slam.episode_manager:main',
         ],
     },
 )

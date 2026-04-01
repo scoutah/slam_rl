@@ -1,13 +1,24 @@
+import json
 import random
 import os
+from pathlib import Path
 from typing import List, Tuple
 
+WORLD_META_FILE = Path('/tmp/slam_world_meta.json')
 
-def generate_random_world(file_path: str) -> bool:
+# Must match the SLAM/Cartographer map resolution
+MAP_RESOLUTION: float = 0.05  # metres per cell
+
+
+def generate_random_world(file_path: str) -> tuple[bool, int]:
     """
     Generates a closed Gazebo SDF world (~5x5m) with room-like interior walls.
-    Writes the world to file_path.
-    Returns True on success, False otherwise.
+    Writes the world to file_path and writes expected traversable cell count
+    to WORLD_META_FILE so exploration nodes can use it as a coverage target.
+
+    Returns:
+        (success, expected_traversable_cells)
+        expected_traversable_cells is 0 on failure.
     """
 
     try:
@@ -18,8 +29,12 @@ def generate_random_world(file_path: str) -> bool:
 
         half = world_size / 2.0
 
+        # Track footprint area of every wall to derive free-space estimate
+        _wall_areas: List[float] = []
+
         def create_wall(name: str, x: float, y: float,
                         size_x: float, size_y: float) -> str:
+            _wall_areas.append(size_x * size_y)
             return f"""
     <model name="{name}">
       <static>1</static>
@@ -252,12 +267,24 @@ def generate_random_world(file_path: str) -> bool:
 </sdf>
 """
 
+        # -------------------------------------------------------
+        # 4. Calculate expected traversable cells
+        # -------------------------------------------------------
+        # Outer walls overlap at the four corners, so subtract those.
+        total_wall_area = sum(_wall_areas) - 4 * (wall_thickness ** 2)
+        free_area = max(0.0, world_size ** 2 - total_wall_area)
+        expected_traversable_cells = int(free_area / MAP_RESOLUTION ** 2)
+
         os.makedirs(os.path.dirname(os.path.abspath(file_path)), exist_ok=True)
 
-        with open(file_path, "w", encoding="utf-8") as f:
+        with open(file_path, 'w', encoding='utf-8') as f:
             f.write(sdf_content)
 
-        return True
+        WORLD_META_FILE.write_text(
+            json.dumps({'expected_traversable_cells': expected_traversable_cells})
+        )
+
+        return True, expected_traversable_cells
 
     except Exception:
-        return False
+        return False, 0

@@ -22,7 +22,8 @@ def generate_launch_description():
     world_file = os.path.join(
         get_package_share_directory('tb3_slam'), 'worlds', 'random_world.sdf'
     )
-    if not generate_random_world(world_file):
+    success, _expected_cells = generate_random_world(world_file)
+    if not success:
         exit(-1)
 
     launch_file_dir = os.path.join(get_package_share_directory('turtlebot3_gazebo'), 'launch')
@@ -140,7 +141,11 @@ def generate_launch_description():
         package='tb3_exploration',
         executable='frontier_explorer',
         name='frontier_explorer',
-        parameters=[{'use_sim_time': use_sim_time}],
+        parameters=[{
+            'use_sim_time': use_sim_time,
+            'coverage_threshold': coverage_threshold,
+            'episode_file': episode_file,
+        }],
         condition=IfCondition(
             PythonExpression(["'", exploration_mode, "' == 'classic'"])
         ),
@@ -150,7 +155,11 @@ def generate_launch_description():
         package='tb3_reinforced_exploration',
         executable='reinforced_exploration',
         name='rl_agent',
-        parameters=[{'use_sim_time': use_sim_time}],
+        parameters=[{
+            'use_sim_time': use_sim_time,
+            'coverage_threshold': coverage_threshold,
+            'episode_file': episode_file,
+        }],
         condition=IfCondition(
             PythonExpression(["'", exploration_mode, "' == 'rl'"])
         ),

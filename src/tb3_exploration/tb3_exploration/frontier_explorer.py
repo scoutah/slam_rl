@@ -7,6 +7,7 @@ from pathlib import Path
 
 import rclpy
 import tf_transformations
+from tf2_ros import Buffer, TransformListener
 from action_msgs.msg import GoalStatus
 from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import OccupancyGrid
@@ -21,7 +22,7 @@ from tb3_slam.coverage_monitor import (
     check_coverage,
     load_expected_cells,
 )
-from tb3_slam.frontier_utils import centroids_from_map, grid_to_world
+from tb3_slam.frontier_utils import centroids_from_map, grid_to_world, world_to_grid
 
 
 class FrontierExplorer(Node):
@@ -55,8 +56,11 @@ class FrontierExplorer(Node):
                 f'[coverage] Expected cells: {expected} (threshold {self._coverage_threshold:.0%})'
             )
 
+        self._tf_buffer = Buffer()
+        self._tf_listener = TransformListener(self._tf_buffer, self)
         self._map_sub = self.create_subscription(OccupancyGrid, '/map', self._map_callback, 10)
         self._nav_client: ActionClient = ActionClient(self, NavigateToPose, 'navigate_to_pose')
+
         self.get_logger().info('FrontierExplorer ready – waiting for /map ...')
 
     # ------------------------------------------------------------------
@@ -80,7 +84,9 @@ class FrontierExplorer(Node):
         if self._goal_active:
             return
 
-        centroids = centroids_from_map(msg)
+        robot_pos = self._get_robot_pos()
+        robot_grid_pos = world_to_grid(robot_pos[0], robot_pos[1], msg) if robot_pos is not None else None
+        centroids = centroids_from_map(msg, robot_grid_pos=robot_grid_pos)
         fresh = [c for c in centroids if c not in self._tried]
         self.get_logger().info(f'[frontier] {len(centroids)} centroid(s), {len(fresh)} fresh')
 
@@ -88,6 +94,14 @@ class FrontierExplorer(Node):
             self._centroid_queue = fresh
             self._current_map = msg
             self._try_next_goal()
+
+    def _get_robot_pos(self) -> tuple[float, float] | None:
+        try:
+            t = self._tf_buffer.lookup_transform('map', 'base_link', rclpy.time.Time())
+            return t.transform.translation.x, t.transform.translation.y
+        except Exception as e:
+            self.get_logger().warning(f'[tf] Could not get robot position: {e}')
+            return None
 
     # ------------------------------------------------------------------
     # Navigation helpers

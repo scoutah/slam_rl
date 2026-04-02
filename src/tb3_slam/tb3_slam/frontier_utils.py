@@ -11,13 +11,20 @@ FRONTIER_MAX = 75
 UNKNOWN = -1
 
 
-def find_frontiers(grid: np.ndarray) -> list[tuple[int, int]]:
+def find_frontiers(
+    grid: np.ndarray,
+    free_seeds: set[tuple[int, int]] | None = None,
+) -> list[tuple[int, int]]:
     """Return all frontier cells (row, col) in the occupancy grid.
 
     A frontier cell is unknown or uncertain and has at least one free neighbor.
+    Cells in ``free_seeds`` are treated as free even if their grid value is not
+    in [0, FREE_MAX].  This allows bootstrapping frontier detection from a known
+    robot position before Cartographer has decayed any cells to free.
     """
     rows, cols = grid.shape
     cardinal = [(-1, 0), (1, 0), (0, -1), (0, 1)]
+    _seeds: set[tuple[int, int]] = free_seeds if free_seeds is not None else set()
     frontiers = []
 
     for r in range(rows):
@@ -28,7 +35,8 @@ def find_frontiers(grid: np.ndarray) -> list[tuple[int, int]]:
                 continue
             for dr, dc in cardinal:
                 nr, nc = r + dr, c + dc
-                if 0 <= nr < rows and 0 <= nc < cols and 0 <= grid[nr, nc] <= FREE_MAX:
+                if (0 <= nr < rows and 0 <= nc < cols
+                        and (0 <= grid[nr, nc] <= FREE_MAX or (nr, nc) in _seeds)):
                     frontiers.append((r, c))
                     break
 
@@ -101,13 +109,19 @@ def find_centroid(
     return None
 
 
-def centroids_from_map(msg: OccupancyGrid) -> list[tuple[int, int]]:
+def centroids_from_map(
+    msg: OccupancyGrid,
+    robot_grid_pos: tuple[int, int] | None = None,
+) -> list[tuple[int, int]]:
     """Run the full frontier pipeline and return navigable centroid cells (row, col).
 
     This is the single entry point used by both FrontierExplorer and RLExplorer.
+    Pass ``robot_grid_pos`` (row, col) to seed frontier detection from the robot's
+    known position, which fixes the startup delay when no free cells exist yet.
     """
     grid = np.array(msg.data, dtype=np.int8).reshape(msg.info.height, msg.info.width)
-    frontiers = find_frontiers(grid)
+    free_seeds = {robot_grid_pos} if robot_grid_pos is not None else None
+    frontiers = find_frontiers(grid, free_seeds=free_seeds)
     groups = find_groups(frontiers)
     result = []
     for group in groups:
@@ -124,3 +138,16 @@ def grid_to_world(cell: tuple[int, int], msg: OccupancyGrid) -> tuple[float, flo
     x = msg.info.origin.position.x + (col + 0.5) * res
     y = msg.info.origin.position.y + (row + 0.5) * res
     return x, y
+
+
+def world_to_grid(x: float, y: float, msg: OccupancyGrid) -> tuple[int, int] | None:
+    """Convert world coordinates (x, y) in meters to a grid cell (row, col).
+
+    Returns None if the position falls outside the grid boundaries.
+    """
+    res = msg.info.resolution
+    col = int((x - msg.info.origin.position.x) / res)
+    row = int((y - msg.info.origin.position.y) / res)
+    if 0 <= row < msg.info.height and 0 <= col < msg.info.width:
+        return (row, col)
+    return None

@@ -30,7 +30,7 @@ from tb3_slam.coverage_monitor import (
     check_coverage,
     load_expected_cells,
 )
-from tb3_slam.frontier_utils import centroids_from_map, grid_to_world
+from tb3_slam.frontier_utils import centroids_from_map, grid_to_world, world_to_grid
 
 try:
     import torch
@@ -171,6 +171,7 @@ class RLExplorer(Node):
         self._tf_listener = TransformListener(self._tf_buffer, self)
         self._map_sub = self.create_subscription(OccupancyGrid, '/map', self._map_callback, 10)
         self._nav_client: ActionClient = ActionClient(self, NavigateToPose, 'navigate_to_pose')
+
         self.get_logger().info('RLExplorer ready – waiting for /map ...')
 
     # ------------------------------------------------------------------
@@ -193,8 +194,9 @@ class RLExplorer(Node):
             return
 
         # ── Record reward for the previous transition ──────────────
-        centroids = centroids_from_map(msg)
         robot_pos = self._get_robot_pos()
+        robot_grid_pos = world_to_grid(robot_pos[0], robot_pos[1], msg) if robot_pos is not None else None
+        centroids = centroids_from_map(msg, robot_grid_pos=robot_grid_pos)
         if robot_pos is None:
             self.get_logger().warning('[rl] Could not get robot position – skipping step')
             return

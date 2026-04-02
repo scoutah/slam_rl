@@ -177,6 +177,6 @@ colcon test-result --verbose
 
 **`source install/setup.bash` vergessen** → ROS2 findet das Paket nicht. Immer nach `colcon build` und in jedem neuen Terminal ausführen.
 
-**Simulation reagiert nicht auf `Ctrl+C`** → `killall gzserver gzclient` im Terminal, dann neu starten.
+**Simulation reagiert nicht auf `Ctrl+C`** → `killall gzserver gzclient` oder `pkill -9 -f gz` im Terminal, dann neu starten.
 
 **Nav2 startet nicht** → Die Verzögerungen im Launch-File (5 s für Cartographer, 10 s für Nav2) sind manchmal auf langsamen Systemen zu kurz. In `sim_slam.launch.py` die `period`-Werte erhöhen.

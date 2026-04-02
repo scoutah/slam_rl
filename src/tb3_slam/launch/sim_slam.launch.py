@@ -2,8 +2,8 @@ import os
 
 from ament_index_python import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import IncludeLaunchDescription, TimerAction, AppendEnvironmentVariable
-from launch.conditions import IfCondition
+from launch.actions import IncludeLaunchDescription, TimerAction, AppendEnvironmentVariable, ExecuteProcess
+from launch.conditions import IfCondition, UnlessCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import PathJoinSubstitution, LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
@@ -14,6 +14,7 @@ from tb3_slam.utils import generate_random_world
 
 def generate_launch_description():
     use_sim_time = LaunchConfiguration('use_sim_time', default='true')
+    headless = LaunchConfiguration('headless', default='false')
     exploration_mode = LaunchConfiguration('exploration_mode', default='classic')
     episode_file = LaunchConfiguration('episode_file', default='/tmp/slam_episode_done')
     coverage_threshold = LaunchConfiguration('coverage_threshold', default='0.95')
@@ -46,6 +47,7 @@ def generate_launch_description():
             os.path.join(ros_gz_sim, 'launch', 'gz_sim.launch.py')
         ),
         launch_arguments={'gz_args': '-g -v2 ', 'use_sim_time': use_sim_time}.items(),
+        condition=UnlessCondition(headless),
     )
 
     robot_state_publisher_cmd = IncludeLaunchDescription(
@@ -105,6 +107,23 @@ def generate_launch_description():
     )
 
     nav2_launch_delayed = TimerAction(period=10.0, actions=[nav2_launch])
+
+    # ── Startup spin (after Cartographer, before Nav2) ───────────────────
+    # Publishes TwistStamped to /cmd_vel for 4 s so Cartographer can map
+    # free cells before the exploration nodes start looking for frontiers.
+
+    startup_spin = ExecuteProcess(
+        cmd=[
+            'ros2', 'topic', 'pub',
+            '--rate', '10',
+            '--times', '40',
+            '/cmd_vel',
+            'geometry_msgs/msg/TwistStamped',
+            '{header: {frame_id: base_link}, twist: {angular: {z: 1.5}}}',
+        ],
+        output='log',
+    )
+    startup_spin_delayed = TimerAction(period=6.0, actions=[startup_spin])
 
     # ── Velocity relay ───────────────────────────────────────────────────
 
@@ -177,6 +196,7 @@ def generate_launch_description():
         spawn_turtlebot_cmd,
         robot_state_publisher_delayed,
         turtlebot3_cartographer_launch_delayed,
+        startup_spin_delayed,
         nav2_launch_delayed,
         cmd_vel_relay,
         episode_manager,

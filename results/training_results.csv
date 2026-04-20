@@ -1,0 +1,12 @@
+timestamp,episode,mode,reason,elapsed_s,coverage
+2026-04-17T14:12:49,1,classic,process_exited,1.2,
+2026-04-17T14:12:53,2,classic,process_exited,1.2,
+2026-04-17T14:12:57,3,classic,process_exited,1.2,
+2026-04-17T14:13:02,4,classic,process_exited,1.2,
+2026-04-17T14:13:06,5,classic,process_exited,1.2,
+2026-04-17T14:13:10,6,classic,process_exited,1.2,
+2026-04-17T14:13:14,7,classic,process_exited,1.2,
+2026-04-17T14:14:27,1,classic,process_exited,55.3,
+2026-04-17T15:15:26,1,classic,timeout,613.7,
+2026-04-17T15:21:59,1,classic,coverage=100.0%,244.3,1.0000
+2026-04-17T15:39:59,1,classic,coverage=99.0%,97.1,0.9900

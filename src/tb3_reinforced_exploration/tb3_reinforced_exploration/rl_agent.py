@@ -212,7 +212,10 @@ class RLExplorer(Node):
 
         # ── Select and execute next action ─────────────────────────
         if not centroids:
-            self.get_logger().info('[rl] No frontier centroids – waiting for new frontiers')
+            self.get_logger().info(
+                '[rl] No frontier centroids – waiting for new frontiers',
+                throttle_duration_sec=5.0,
+            )
             return
 
         n_valid = min(len(centroids), MAX_CENTROIDS)

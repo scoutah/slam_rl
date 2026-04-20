@@ -73,10 +73,6 @@ class FrontierExplorer(Node):
 
         if self._expected_cells > 0:
             coverage, known = check_coverage(msg, self._expected_cells)
-            self.get_logger().info(
-                f'[coverage] {coverage:.1%}  ({known}/{self._expected_cells} cells)',
-                throttle_duration_sec=5.0,
-            )
             if coverage >= self._coverage_threshold:
                 self._finish(coverage)
                 return
@@ -88,7 +84,10 @@ class FrontierExplorer(Node):
         robot_grid_pos = world_to_grid(robot_pos[0], robot_pos[1], msg) if robot_pos is not None else None
         centroids = centroids_from_map(msg, robot_grid_pos=robot_grid_pos)
         fresh = [c for c in centroids if c not in self._tried]
-        self.get_logger().info(f'[frontier] {len(centroids)} centroid(s), {len(fresh)} fresh')
+        self.get_logger().info(
+            f'[frontier] {len(centroids)} centroid(s), {len(fresh)} fresh',
+            throttle_duration_sec=5.0,
+        )
 
         if fresh:
             self._centroid_queue = fresh
@@ -110,7 +109,10 @@ class FrontierExplorer(Node):
     def _try_next_goal(self) -> None:
         """Pop the next centroid and send it to Nav2."""
         if not self._centroid_queue or self._current_map is None:
-            self.get_logger().warning('[goal] Queue empty – waiting for new frontiers')
+            self.get_logger().warning(
+                '[goal] Queue empty – waiting for new frontiers',
+                throttle_duration_sec=5.0,
+            )
             self._goal_active = False
             return
 

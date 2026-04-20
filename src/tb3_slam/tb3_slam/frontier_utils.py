@@ -17,10 +17,13 @@ def find_frontiers(
 ) -> list[tuple[int, int]]:
     """Return all frontier cells (row, col) in the occupancy grid.
 
-    A frontier cell is unknown or uncertain and has at least one free neighbor.
-    Cells in ``free_seeds`` are treated as free even if their grid value is not
-    in [0, FREE_MAX].  This allows bootstrapping frontier detection from a known
-    robot position before Cartographer has decayed any cells to free.
+    A frontier cell is any UNKNOWN (-1) or UNCERTAIN (26-75) cell that has at
+    least one FREE (0-25) cardinal neighbor.  This covers both boundaries:
+    FREE/UNKNOWN and FREE/UNCERTAIN.
+
+    Cells in ``free_seeds`` are treated as FREE even if their grid value is
+    outside [0, FREE_MAX].  This allows bootstrapping from the robot's known
+    position before Cartographer has decayed any cells to free.
     """
     rows, cols = grid.shape
     cardinal = [(-1, 0), (1, 0), (0, -1), (0, 1)]
@@ -30,8 +33,7 @@ def find_frontiers(
     for r in range(rows):
         for c in range(cols):
             cell = grid[r, c]
-            is_frontier = cell == UNKNOWN or FRONTIER_MIN <= cell <= FRONTIER_MAX
-            if not is_frontier:
+            if cell != UNKNOWN and not (FRONTIER_MIN <= cell <= FRONTIER_MAX):
                 continue
             for dr, dc in cardinal:
                 nr, nc = r + dr, c + dc
@@ -93,8 +95,20 @@ def find_centroid(
     cr = sum(r for r, _ in group) // n
     cc = sum(c for _, c in group) // n
 
+    # Keep cells far enough from the map edge that Nav2's planner can look up
+    # the costmap around the goal (robot footprint + inflation) without going
+    # out of bounds.  Default inflation_radius is 0.55 m → 11 cells at 0.05 m
+    # resolution.  Scale down on tiny maps (early exploration) so we don't
+    # reject every candidate cell.
+    MARGIN = min(12, min(rows, cols) // 6)
+
+    def _is_valid_free(r: int, c: int) -> bool:
+        return (MARGIN <= r < rows - MARGIN
+                and MARGIN <= c < cols - MARGIN
+                and 0 <= grid[r, c] <= FREE_MAX)
+
     # Is the centroid itself free?
-    if 0 <= cr < rows and 0 <= cc < cols and 0 <= grid[cr, cc] <= FREE_MAX:
+    if _is_valid_free(cr, cc):
         return (cr, cc)
 
     # Find frontier cell nearest to the centroid
@@ -103,7 +117,7 @@ def find_centroid(
     # Return a free cardinal neighbor
     for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
         nr, nc = nearest[0] + dr, nearest[1] + dc
-        if 0 <= nr < rows and 0 <= nc < cols and 0 <= grid[nr, nc] <= FREE_MAX:
+        if _is_valid_free(nr, nc):
             return (nr, nc)
 
     return None
@@ -132,11 +146,18 @@ def centroids_from_map(
 
 
 def grid_to_world(cell: tuple[int, int], msg: OccupancyGrid) -> tuple[float, float]:
-    """Convert a grid cell (row, col) to world coordinates (x, y) in meters."""
+    """Convert a grid cell (row, col) to world coordinates (x, y) in meters.
+
+    Uses offset 0.4999 (not 0.5) because Nav2's NavfnPlanner uses round() when
+    converting back – round(col + 0.5) = col + 1 (C++ rounds half away from 0),
+    which shifts our goal one cell and fails on the last column/row with
+    "worldToMap failed: mx=size_x". 0.4999 makes both round() and int() return
+    col consistently. Visual shift: 0.005 mm at 0.05 m resolution – negligible.
+    """
     row, col = cell
     res = msg.info.resolution
-    x = msg.info.origin.position.x + (col + 0.5) * res
-    y = msg.info.origin.position.y + (row + 0.5) * res
+    x = msg.info.origin.position.x + (col + 0.4999) * res
+    y = msg.info.origin.position.y + (row + 0.4999) * res
     return x, y
 
 

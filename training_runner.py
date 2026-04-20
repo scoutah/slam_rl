@@ -40,7 +40,7 @@ INTER_EPISODE_PAUSE = 3  # seconds to wait after shutdown before next launch
 DEFAULT_RESULT_FILE = Path(__file__).resolve().parent / 'results' / 'training_results.csv'
 
 # ROS node name substrings whose log lines are suppressed in the terminal
-LOG_FILTER: list[str] = ['cartographer-node-8']
+LOG_FILTER: list[str] = ['cartographer_node-8', 'controller_server-12']
 
 
 # ---------------------------------------------------------------------------
@@ -239,8 +239,8 @@ def main() -> None:
                         help='Number of episodes to run (default: 10)')
     parser.add_argument('--timeout', type=float, default=600.0,
                         help='Max episode duration in seconds (default: 600)')
-    parser.add_argument('--threshold', type=float, default=0.95,
-                        help='Coverage threshold to end episode (default: 0.95)')
+    parser.add_argument('--threshold', type=float, default=0.99,
+                        help='Coverage threshold to end episode (default: 0.99)')
     parser.add_argument('--headless', action='store_true',
                         help='Skip Gazebo GUI client')
     parser.add_argument('--result-file', type=Path, default=DEFAULT_RESULT_FILE,

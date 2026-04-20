@@ -14,7 +14,7 @@ from nav_msgs.msg import OccupancyGrid
 
 from tb3_slam.utils import WORLD_META_FILE
 
-DEFAULT_COVERAGE_THRESHOLD: float = 0.95
+DEFAULT_COVERAGE_THRESHOLD: float = 0.99
 
 
 def load_expected_cells() -> int | None:

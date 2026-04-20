@@ -25,7 +25,7 @@ class EpisodeManager(Node):
     def __init__(self) -> None:
         super().__init__('episode_manager')
 
-        self.declare_parameter('coverage_threshold', 0.95)
+        self.declare_parameter('coverage_threshold', 0.99)
         self.declare_parameter('episode_file', '/tmp/slam_episode_done')
         self.declare_parameter('max_episode_duration', 600.0)  # seconds
 

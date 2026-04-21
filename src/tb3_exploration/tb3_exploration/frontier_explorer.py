@@ -96,10 +96,10 @@ class FrontierExplorer(Node):
                 self._finish(coverage)
                 return
 
-        if self._goal_active:
-            self._supervise_active_goal()
-            return
-
+        # Run detection + publish markers on EVERY map update so RViz shows
+        # frontier cells and the active goal while Nav2 is navigating. If we
+        # gated this behind `_goal_active`, the MarkerArray would stop
+        # updating the moment the first goal is dispatched.
         robot_pos = self._get_robot_pos()
         robot_grid_pos = world_to_grid(robot_pos[0], robot_pos[1], msg) if robot_pos is not None else None
         centroids, stats = centroids_from_map_debug(msg, robot_grid_pos=robot_grid_pos)
@@ -111,6 +111,11 @@ class FrontierExplorer(Node):
                 stamp=self.get_clock().now().to_msg(),
             )
         )
+
+        if self._goal_active:
+            self._supervise_active_goal()
+            return
+
         fresh = [c for c in centroids if c not in self._tried]
         self.get_logger().info(
             f'[frontier] {len(centroids)} centroid(s), {len(fresh)} fresh',

@@ -33,25 +33,35 @@ def find_frontiers(
     _seeds: set[tuple[int, int]] = free_seeds if free_seeds is not None else set()
 
     # ── BFS path ────────────────────────────────────────────────────────
+    # BFS traverses every known non-wall cell (FREE + UNCERTAIN). In this
+    # SLAM setup, Cartographer often leaves walls in the UNCERTAIN range
+    # (26–89) without ever reaching WALL_MIN, so a BFS limited to FREE
+    # gets trapped inside the explored region and never sees the UNKNOWN
+    # boundary behind the “walls”. Including UNCERTAIN cells in traversal
+    # lets us still find UNKNOWN frontiers; Nav2's costmap handles actual
+    # wall avoidance when we navigate to a FREE cell near the frontier.
     if robot_grid_pos is not None:
         sr, sc = robot_grid_pos
         if 0 <= sr < rows and 0 <= sc < cols:
-            def _is_free(r: int, c: int) -> bool:
-                return (0 <= grid[r, c] <= FREE_MAX) or ((r, c) in _seeds)
+            def _is_traversable(r: int, c: int) -> bool:
+                if (r, c) in _seeds:
+                    return True
+                v = grid[r, c]
+                return v != UNKNOWN and v < WALL_MIN
 
             visited: set[tuple[int, int]] = set()
             frontier_set: set[tuple[int, int]] = set()
             queue: deque[tuple[int, int]] = deque()
 
-            if _is_free(sr, sc):
+            if _is_traversable(sr, sc):
                 queue.append((sr, sc))
                 visited.add((sr, sc))
             else:
-                # Robot in uncertain/unknown space; seed from adjacent free cells.
+                # Robot in unknown cell; seed from any traversable cardinal neighbour.
                 for dr, dc in cardinal:
                     nr, nc = sr + dr, sc + dc
                     if (0 <= nr < rows and 0 <= nc < cols
-                            and _is_free(nr, nc) and (nr, nc) not in visited):
+                            and _is_traversable(nr, nc) and (nr, nc) not in visited):
                         queue.append((nr, nc))
                         visited.add((nr, nc))
 
@@ -64,7 +74,7 @@ def find_frontiers(
                     nval = grid[nr, nc]
                     if nval == UNKNOWN:
                         frontier_set.add((nr, nc))
-                    elif _is_free(nr, nc) and (nr, nc) not in visited:
+                    elif (nr, nc) not in visited and _is_traversable(nr, nc):
                         visited.add((nr, nc))
                         queue.append((nr, nc))
 
@@ -135,17 +145,32 @@ def find_groups(frontiers: list[tuple[int, int]]) -> list[list[tuple[int, int]]]
     return groups
 
 
-def find_centroid(
-    group: list[tuple[int, int]], grid: np.ndarray
-) -> tuple[int, int] | None:
-    """Return a navigable (free) cell near the geometric centroid of a frontier group.
+# Minimum grid-cell distance between goal and robot. Nav2's default xy_goal_
+# tolerance is ~0.25m (5 cells at 0.05m). In practice we see Nav2 declare
+# "Goal succeeded" in <50 ms even at ~0.43m — likely a map/TF origin drift
+# between Cartographer updates desynchronising our world frame from Nav2's.
+# 15 cells (0.75m) is safely beyond any realistic drift + tolerance.
+MIN_GOAL_GRID_DIST = 15
 
-    Strategy:
-    1. Compute geometric centroid of the group.
-    2. If the centroid itself is free, return it.
-    3. Otherwise, find the nearest frontier cell to the centroid.
-    4. Return the first free cardinal neighbor of that cell.
-    5. Return None if no free neighbor exists.
+
+def find_centroid(
+    group: list[tuple[int, int]],
+    grid: np.ndarray,
+    robot_grid_pos: tuple[int, int] | None = None,
+) -> tuple[int, int] | None:
+    """Return a navigable FREE cell near the geometric centroid of a frontier group.
+
+    The frontier cells are UNKNOWN; the goal must be a FREE cell Nav2 can plan
+    to. Walls in this SLAM setup can live in the UNCERTAIN range, so a naive
+    cardinal-neighbour search often fails when a frontier group is separated
+    from FREE space by a thin band of UNCERTAIN cells. We BFS outward from the
+    frontier cells through any non-wall cell (UNKNOWN, UNCERTAIN) until we hit
+    a FREE cell, picking the one closest to the group centroid.
+
+    When ``robot_grid_pos`` is given, FREE cells within ``MIN_GOAL_GRID_DIST``
+    of the robot are rejected so the commanded goal actually produces motion
+    (otherwise Nav2 declares instant success inside its xy_goal_tolerance and
+    the robot stays put, re-triggering the same frontier indefinitely).
     """
     if not group:
         return None
@@ -155,34 +180,52 @@ def find_centroid(
     cr = sum(r for r, _ in group) // n
     cc = sum(c for _, c in group) // n
 
-    # Small margin to avoid placing goals exactly at the map boundary.
-    # The offset 0.4999 in grid_to_world already prevents Nav2's round()
-    # rounding a boundary cell to size+1, so MARGIN=2 is sufficient.
     MARGIN = 2
+    min_dist_sq = MIN_GOAL_GRID_DIST * MIN_GOAL_GRID_DIST
+
+    def _too_close_to_robot(r: int, c: int) -> bool:
+        if robot_grid_pos is None:
+            return False
+        dr_ = r - robot_grid_pos[0]
+        dc_ = c - robot_grid_pos[1]
+        return dr_ * dr_ + dc_ * dc_ < min_dist_sq
 
     def _is_valid_free(r: int, c: int) -> bool:
         return (MARGIN <= r < rows - MARGIN
                 and MARGIN <= c < cols - MARGIN
-                and 0 <= grid[r, c] <= FREE_MAX)
+                and 0 <= grid[r, c] <= FREE_MAX
+                and not _too_close_to_robot(r, c))
 
-    # Is the centroid itself free?
     if _is_valid_free(cr, cc):
         return (cr, cc)
 
-    # Search ALL frontier cells' cardinal neighbors for the free cell
-    # closest to the centroid.  Checking only the single nearest frontier
-    # cell misses valid goals when that cell's neighbors are uncertain or
-    # in the margin zone.
+    visited: set[tuple[int, int]] = set(group)
+    queue: deque[tuple[int, int]] = deque(group)
     best: tuple[int, int] | None = None
     best_dist = float('inf')
-    for fr, fc in group:
+    expansions = 0
+    MAX_EXPANSIONS = rows * cols
+
+    while queue and expansions < MAX_EXPANSIONS:
+        r, c = queue.popleft()
+        expansions += 1
         for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
-            nr, nc = fr + dr, fc + dc
+            nr, nc = r + dr, c + dc
+            if not (0 <= nr < rows and 0 <= nc < cols):
+                continue
+            if (nr, nc) in visited:
+                continue
+            visited.add((nr, nc))
             if _is_valid_free(nr, nc):
                 dist = math.hypot(nr - cr, nc - cc)
                 if dist < best_dist:
                     best_dist = dist
                     best = (nr, nc)
+                continue
+            v = grid[nr, nc]
+            if v >= WALL_MIN:
+                continue
+            queue.append((nr, nc))
 
     return best
 
@@ -197,16 +240,86 @@ def centroids_from_map(
     Pass ``robot_grid_pos`` (row, col) to seed frontier detection from the robot's
     known position, which fixes the startup delay when no free cells exist yet.
     """
+    centroids, _ = centroids_from_map_debug(msg, robot_grid_pos=robot_grid_pos)
+    return centroids
+
+
+def centroids_from_map_debug(
+    msg: OccupancyGrid,
+    robot_grid_pos: tuple[int, int] | None = None,
+) -> tuple[list[tuple[int, int]], dict]:
+    """Same as ``centroids_from_map`` but also returns diagnostic stats.
+
+    Stats keys:
+      - grid_shape, robot_grid_pos, robot_cell_value
+      - n_free, n_uncertain, n_wall, n_unknown
+      - n_frontiers, n_groups, n_centroids, n_dropped_groups
+      - group_sizes (list of ints), dropped_group_sample (up to 3 dropped groups
+        with centroid coords + cell value + 3 frontier cells with cardinal
+        neighbour values — for understanding why find_centroid returned None)
+    """
     grid = np.array(msg.data, dtype=np.int8).reshape(msg.info.height, msg.info.width)
     free_seeds = {robot_grid_pos} if robot_grid_pos is not None else None
+
+    rows, cols = grid.shape
+    n_unknown = int(np.sum(grid == UNKNOWN))
+    n_free = int(np.sum((grid >= 0) & (grid <= FREE_MAX)))
+    n_uncertain = int(np.sum((grid >= FRONTIER_MIN) & (grid <= FRONTIER_MAX)))
+    n_wall = int(np.sum(grid >= WALL_MIN))
+    robot_cell_value: int | None = None
+    if (robot_grid_pos is not None
+            and 0 <= robot_grid_pos[0] < rows
+            and 0 <= robot_grid_pos[1] < cols):
+        robot_cell_value = int(grid[robot_grid_pos[0], robot_grid_pos[1]])
+
     frontiers = find_frontiers(grid, free_seeds=free_seeds, robot_grid_pos=robot_grid_pos)
     groups = find_groups(frontiers)
-    result = []
+
+    centroids: list[tuple[int, int]] = []
+    dropped_samples: list[dict] = []
     for group in groups:
-        centroid = find_centroid(group, grid)
+        centroid = find_centroid(group, grid, robot_grid_pos=robot_grid_pos)
         if centroid is not None:
-            result.append(centroid)
-    return result
+            centroids.append(centroid)
+        elif len(dropped_samples) < 3:
+            n = len(group)
+            cr = sum(r for r, _ in group) // n
+            cc = sum(c for _, c in group) // n
+            centroid_val = (int(grid[cr, cc])
+                            if 0 <= cr < rows and 0 <= cc < cols else None)
+            sample_cells = []
+            for fr, fc in group[:3]:
+                neigh = []
+                for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                    nr, nc = fr + dr, fc + dc
+                    if 0 <= nr < rows and 0 <= nc < cols:
+                        neigh.append(int(grid[nr, nc]))
+                    else:
+                        neigh.append(None)
+                sample_cells.append({'cell': (fr, fc), 'neighbours': neigh})
+            dropped_samples.append({
+                'size': n,
+                'centroid_rc': (cr, cc),
+                'centroid_value': centroid_val,
+                'samples': sample_cells,
+            })
+
+    stats = {
+        'grid_shape': (rows, cols),
+        'robot_grid_pos': robot_grid_pos,
+        'robot_cell_value': robot_cell_value,
+        'n_free': n_free,
+        'n_uncertain': n_uncertain,
+        'n_wall': n_wall,
+        'n_unknown': n_unknown,
+        'n_frontiers': len(frontiers),
+        'n_groups': len(groups),
+        'n_centroids': len(centroids),
+        'n_dropped_groups': len(groups) - len(centroids),
+        'group_sizes': [len(g) for g in groups],
+        'dropped_group_sample': dropped_samples,
+    }
+    return centroids, stats
 
 
 def grid_to_world(cell: tuple[int, int], msg: OccupancyGrid) -> tuple[float, float]:

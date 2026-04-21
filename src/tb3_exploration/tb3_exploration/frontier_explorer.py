@@ -3,6 +3,7 @@
 Detects frontier centroids from the map and drives the robot to each one via Nav2
 until the coverage threshold is reached.
 """
+import math
 from pathlib import Path
 
 import rclpy
@@ -22,7 +23,7 @@ from tb3_slam.coverage_monitor import (
     check_coverage,
     load_expected_cells,
 )
-from tb3_slam.frontier_utils import centroids_from_map, grid_to_world, world_to_grid
+from tb3_slam.frontier_utils import centroids_from_map_debug, grid_to_world, world_to_grid
 
 
 class FrontierExplorer(Node):
@@ -43,8 +44,23 @@ class FrontierExplorer(Node):
         self._current_map: OccupancyGrid | None = None
         self._centroid_queue: list[tuple[int, int]] = []
         self._current_target: tuple[int, int] | None = None
-        # Centroids that failed in the current round (cleared on success)
+        # Centroids that failed in the current round (cleared on success that
+        # actually moved the robot — see _on_goal_result)
         self._tried: set[tuple[int, int]] = set()
+        # Robot world position captured at goal dispatch, used to detect
+        # "Nav2 succeeded but robot didn't move" scenarios (TF/tolerance mismatch)
+        self._goal_dispatch_pos: tuple[float, float] | None = None
+        self._goal_dispatch_world: tuple[float, float] | None = None
+        self._goal_dispatch_time: float | None = None
+        self._goal_handle: ClientGoalHandle | None = None
+        # Meters — if a "SUCCEEDED" goal moved the robot less than this, the
+        # goal was likely reached by coincidence/tolerance rather than real
+        # navigation; mark it tried to break repeat cycles.
+        self._MIN_PROGRESS_M = 0.2
+        # Seconds — cancel a goal that Nav2 has not completed in this time.
+        # Covers infinite recovery loops (spin → wait → backup) that never
+        # return SUCCEEDED/ABORTED and would otherwise silence the explorer.
+        self._GOAL_TIMEOUT_S = 45.0
 
         expected = load_expected_cells()
         if expected is None:
@@ -78,21 +94,55 @@ class FrontierExplorer(Node):
                 return
 
         if self._goal_active:
+            self._supervise_active_goal()
             return
 
         robot_pos = self._get_robot_pos()
         robot_grid_pos = world_to_grid(robot_pos[0], robot_pos[1], msg) if robot_pos is not None else None
-        centroids = centroids_from_map(msg, robot_grid_pos=robot_grid_pos)
+        centroids, stats = centroids_from_map_debug(msg, robot_grid_pos=robot_grid_pos)
         fresh = [c for c in centroids if c not in self._tried]
         self.get_logger().info(
             f'[frontier] {len(centroids)} centroid(s), {len(fresh)} fresh',
             throttle_duration_sec=5.0,
         )
 
+        # Detailed diagnostics when the pipeline produces nothing navigable —
+        # tells us which stage swallowed the frontiers (detection, grouping,
+        # centroid validation) or whether the robot pose is broken.
+        if not fresh:
+            self._log_pipeline_stats(stats)
+
         if fresh:
             self._centroid_queue = fresh
             self._current_map = msg
             self._try_next_goal()
+
+    def _log_pipeline_stats(self, stats: dict) -> None:
+        log = self.get_logger()
+        log.warning(
+            '[diag] pipeline produced no fresh centroids — '
+            f'tried={len(self._tried)} '
+            f'robot_grid={stats["robot_grid_pos"]} '
+            f'robot_cell_val={stats["robot_cell_value"]} '
+            f'grid={stats["grid_shape"]} '
+            f'cells free={stats["n_free"]} unc={stats["n_uncertain"]} '
+            f'wall={stats["n_wall"]} unk={stats["n_unknown"]}',
+            throttle_duration_sec=5.0,
+        )
+        log.warning(
+            f'[diag] pipeline frontiers={stats["n_frontiers"]} '
+            f'groups={stats["n_groups"]} centroids={stats["n_centroids"]} '
+            f'dropped_groups={stats["n_dropped_groups"]} '
+            f'group_sizes={stats["group_sizes"][:10]}',
+            throttle_duration_sec=5.0,
+        )
+        for i, d in enumerate(stats['dropped_group_sample']):
+            log.warning(
+                f'[diag] dropped#{i} size={d["size"]} '
+                f'centroid_rc={d["centroid_rc"]} centroid_val={d["centroid_value"]} '
+                f'samples={d["samples"]}',
+                throttle_duration_sec=5.0,
+            )
 
     def _get_robot_pos(self) -> tuple[float, float] | None:
         try:
@@ -119,8 +169,19 @@ class FrontierExplorer(Node):
         target = self._centroid_queue.pop(0)
         self._current_target = target
         x, y = grid_to_world(target, self._current_map)
+        robot = self._get_robot_pos()
+        dist_str = 'n/a'
+        if robot is not None:
+            d = math.hypot(x - robot[0], y - robot[1])
+            dist_str = f'{d:.2f}m'
+        self._goal_dispatch_pos = robot
+        self._goal_dispatch_world = (x, y)
+        self._goal_dispatch_time = self.get_clock().now().nanoseconds * 1e-9
         self.get_logger().info(
-            f'[goal] → ({x:.2f}, {y:.2f})  ({len(self._centroid_queue)} remaining)'
+            f'[goal] → ({x:.2f}, {y:.2f})  robot=({robot[0]:.2f}, {robot[1]:.2f})  '
+            f'dist={dist_str}  ({len(self._centroid_queue)} remaining)'
+            if robot is not None else
+            f'[goal] → ({x:.2f}, {y:.2f})  robot=unknown  ({len(self._centroid_queue)} remaining)'
         )
         self._send_goal(x, y)
 
@@ -150,20 +211,41 @@ class FrontierExplorer(Node):
         handle: ClientGoalHandle = future.result()
         if not handle.accepted:
             self.get_logger().warning('[goal] REJECTED – trying next centroid')
+            self._goal_handle = None
             self._mark_tried_and_continue()
             return
+        self._goal_handle = handle
         self.get_logger().info('[goal] ACCEPTED – navigating ...')
         handle.get_result_async().add_done_callback(self._on_goal_result)
 
     def _on_goal_result(self, future: Future) -> None:
         status: int = future.result().status
+        self._goal_handle = None
 
         if status == GoalStatus.STATUS_SUCCEEDED:
-            self.get_logger().info('[goal] SUCCEEDED')
-            self._tried.clear()
-            self._current_target = None
-            self._goal_active = False
-            self._centroid_queue.clear()
+            moved = self._progress_since_dispatch()
+            moved_str = f'{moved:.2f}m' if moved is not None else 'n/a'
+            if moved is not None and moved < self._MIN_PROGRESS_M:
+                # Nav2 says success but the robot barely moved — happens when
+                # Nav2's internal pose is already inside its goal_tolerance of
+                # the target even though our TF said otherwise. Mark this
+                # target as tried so we pick a different frontier next round
+                # instead of looping on the same coordinates.
+                self.get_logger().warning(
+                    f'[goal] SUCCEEDED but robot moved only {moved_str} '
+                    f'(< {self._MIN_PROGRESS_M}m) — marking target tried'
+                )
+                if self._current_target is not None:
+                    self._tried.add(self._current_target)
+                self._current_target = None
+                self._goal_active = False
+                self._centroid_queue.clear()
+            else:
+                self.get_logger().info(f'[goal] SUCCEEDED  moved={moved_str}')
+                self._tried.clear()
+                self._current_target = None
+                self._goal_active = False
+                self._centroid_queue.clear()
 
         elif status == GoalStatus.STATUS_ABORTED:
             self.get_logger().warning(
@@ -182,6 +264,56 @@ class FrontierExplorer(Node):
             self._tried.add(self._current_target)
             self._current_target = None
         self._try_next_goal()
+
+    def _supervise_active_goal(self) -> None:
+        """Periodic watchdog for goals stuck in Nav2 recovery loops.
+
+        Nav2's recovery subtree (spin → wait → backup) can iterate for a long
+        time without ever returning SUCCEEDED or ABORTED. Without a timeout,
+        ``_goal_active`` stays True forever and the explorer goes silent —
+        the user sees no frontier/goal logs and the episode runs down its
+        clock. We log progress periodically and force-cancel after a limit.
+        """
+        if self._goal_dispatch_time is None:
+            return
+        elapsed = self.get_clock().now().nanoseconds * 1e-9 - self._goal_dispatch_time
+        moved = self._progress_since_dispatch()
+        moved_str = f'{moved:.2f}m' if moved is not None else 'n/a'
+        target_str = (
+            f'{self._goal_dispatch_world[0]:.2f}, {self._goal_dispatch_world[1]:.2f}'
+            if self._goal_dispatch_world is not None else 'n/a'
+        )
+        self.get_logger().info(
+            f'[goal] active {elapsed:.0f}s target=({target_str}) moved={moved_str}',
+            throttle_duration_sec=5.0,
+        )
+        if elapsed > self._GOAL_TIMEOUT_S and self._goal_handle is not None:
+            self.get_logger().warning(
+                f'[goal] TIMEOUT after {elapsed:.0f}s — cancelling and trying next'
+            )
+            try:
+                self._goal_handle.cancel_goal_async()
+            except Exception as e:
+                self.get_logger().warning(f'[goal] cancel failed: {e}')
+            # Defensive: mark tried locally so we skip this centroid even if
+            # the cancel callback is slow to fire.
+            if self._current_target is not None:
+                self._tried.add(self._current_target)
+            self._current_target = None
+            self._goal_handle = None
+            self._goal_active = False
+            self._centroid_queue.clear()
+
+    def _progress_since_dispatch(self) -> float | None:
+        """Return distance (m) the robot actually moved since the goal was sent."""
+        if self._goal_dispatch_pos is None:
+            return None
+        now = self._get_robot_pos()
+        if now is None:
+            return None
+        dx = now[0] - self._goal_dispatch_pos[0]
+        dy = now[1] - self._goal_dispatch_pos[1]
+        return math.hypot(dx, dy)
 
     # ------------------------------------------------------------------
     # Episode completion

@@ -24,13 +24,15 @@ from rclpy.action.client import ClientGoalHandle
 from rclpy.node import Node
 from rclpy.task import Future
 from tf2_ros import Buffer, TransformListener
+from visualization_msgs.msg import MarkerArray
 
 from tb3_slam.coverage_monitor import (
     DEFAULT_COVERAGE_THRESHOLD,
     check_coverage,
     load_expected_cells,
 )
-from tb3_slam.frontier_utils import centroids_from_map, grid_to_world, world_to_grid
+from tb3_slam.frontier_utils import centroids_from_map_debug, grid_to_world, world_to_grid
+from tb3_slam.frontier_viz import build_frontier_markers
 
 try:
     import torch
@@ -145,6 +147,7 @@ class RLExplorer(Node):
         # ── Navigation state ───────────────────────────────────────
         self._goal_active = False
         self._current_map: OccupancyGrid | None = None
+        self._current_target_cell: tuple[int, int] | None = None
 
         # ── RL state ───────────────────────────────────────────────
         self._epsilon = EPSILON_START
@@ -171,6 +174,7 @@ class RLExplorer(Node):
         self._tf_listener = TransformListener(self._tf_buffer, self)
         self._map_sub = self.create_subscription(OccupancyGrid, '/map', self._map_callback, 10)
         self._nav_client: ActionClient = ActionClient(self, NavigateToPose, 'navigate_to_pose')
+        self._viz_pub = self.create_publisher(MarkerArray, '/frontiers_viz', 10)
 
         self.get_logger().info('RLExplorer ready – waiting for /map ...')
 
@@ -196,7 +200,15 @@ class RLExplorer(Node):
         # ── Record reward for the previous transition ──────────────
         robot_pos = self._get_robot_pos()
         robot_grid_pos = world_to_grid(robot_pos[0], robot_pos[1], msg) if robot_pos is not None else None
-        centroids = centroids_from_map(msg, robot_grid_pos=robot_grid_pos)
+        centroids, stats = centroids_from_map_debug(msg, robot_grid_pos=robot_grid_pos)
+        self._viz_pub.publish(
+            build_frontier_markers(
+                stats['frontiers'],
+                self._current_target_cell,
+                msg,
+                stamp=self.get_clock().now().to_msg(),
+            )
+        )
         if robot_pos is None:
             self.get_logger().warning('[rl] Could not get robot position – skipping step')
             return
@@ -222,6 +234,7 @@ class RLExplorer(Node):
         action = self._select_action(next_state, n_valid)
         target_cell = centroids[action]
         self._current_map = msg
+        self._current_target_cell = target_cell
 
         x, y = grid_to_world(target_cell, msg)
         self.get_logger().info(
@@ -368,6 +381,7 @@ class RLExplorer(Node):
         }.get(status, f'status={status}')
         self.get_logger().info(f'[goal] {status_name}')
         self._goal_active = False
+        self._current_target_cell = None
         # The next _map_callback will compute the reward and select a new action.
 
     # ------------------------------------------------------------------

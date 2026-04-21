@@ -17,6 +17,7 @@ from rclpy.action import ActionClient
 from rclpy.action.client import ClientGoalHandle
 from rclpy.node import Node
 from rclpy.task import Future
+from visualization_msgs.msg import MarkerArray
 
 from tb3_slam.coverage_monitor import (
     DEFAULT_COVERAGE_THRESHOLD,
@@ -24,6 +25,7 @@ from tb3_slam.coverage_monitor import (
     load_expected_cells,
 )
 from tb3_slam.frontier_utils import centroids_from_map_debug, grid_to_world, world_to_grid
+from tb3_slam.frontier_viz import build_frontier_markers
 
 
 class FrontierExplorer(Node):
@@ -76,6 +78,7 @@ class FrontierExplorer(Node):
         self._tf_listener = TransformListener(self._tf_buffer, self)
         self._map_sub = self.create_subscription(OccupancyGrid, '/map', self._map_callback, 10)
         self._nav_client: ActionClient = ActionClient(self, NavigateToPose, 'navigate_to_pose')
+        self._viz_pub = self.create_publisher(MarkerArray, '/frontiers_viz', 10)
 
         self.get_logger().info('FrontierExplorer ready – waiting for /map ...')
 
@@ -100,6 +103,14 @@ class FrontierExplorer(Node):
         robot_pos = self._get_robot_pos()
         robot_grid_pos = world_to_grid(robot_pos[0], robot_pos[1], msg) if robot_pos is not None else None
         centroids, stats = centroids_from_map_debug(msg, robot_grid_pos=robot_grid_pos)
+        self._viz_pub.publish(
+            build_frontier_markers(
+                stats['frontiers'],
+                self._current_target,
+                msg,
+                stamp=self.get_clock().now().to_msg(),
+            )
+        )
         fresh = [c for c in centroids if c not in self._tried]
         self.get_logger().info(
             f'[frontier] {len(centroids)} centroid(s), {len(fresh)} fresh',

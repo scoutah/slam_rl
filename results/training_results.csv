@@ -10,3 +10,4 @@ timestamp,episode,mode,reason,elapsed_s,coverage
 2026-04-17T15:15:26,1,classic,timeout,613.7,
 2026-04-17T15:21:59,1,classic,coverage=100.0%,244.3,1.0000
 2026-04-17T15:39:59,1,classic,coverage=99.0%,97.1,0.9900
+2026-04-20T14:57:48,1,classic,timeout,605.2,

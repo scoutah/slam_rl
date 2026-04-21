@@ -189,7 +189,7 @@ def generate_launch_description():
     )
 
     exploration_delayed = TimerAction(
-        period=12.0,
+        period=20.0,
         actions=[frontier_explorer, rl_agent],
     )
 

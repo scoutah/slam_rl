@@ -318,6 +318,7 @@ def centroids_from_map_debug(
         'n_dropped_groups': len(groups) - len(centroids),
         'group_sizes': [len(g) for g in groups],
         'dropped_group_sample': dropped_samples,
+        'frontiers': frontiers,
     }
     return centroids, stats
 

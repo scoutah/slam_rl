@@ -2,7 +2,7 @@ import os
 
 from ament_index_python import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import IncludeLaunchDescription, TimerAction, AppendEnvironmentVariable, ExecuteProcess
+from launch.actions import IncludeLaunchDescription, TimerAction, AppendEnvironmentVariable, ExecuteProcess, SetEnvironmentVariable
 from launch.conditions import IfCondition, UnlessCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import PathJoinSubstitution, LaunchConfiguration, PythonExpression
@@ -17,7 +17,7 @@ def generate_launch_description():
     headless = LaunchConfiguration('headless', default='false')
     exploration_mode = LaunchConfiguration('exploration_mode', default='classic')
     episode_file = LaunchConfiguration('episode_file', default='/tmp/slam_episode_done')
-    coverage_threshold = LaunchConfiguration('coverage_threshold', default='0.95')
+    coverage_threshold = LaunchConfiguration('coverage_threshold', default='0.99')
     max_episode_duration = LaunchConfiguration('max_episode_duration', default='600.0')
 
     world_file = os.path.join(
@@ -131,6 +131,7 @@ def generate_launch_description():
         package='tb3_slam',
         executable='cmd_vel_relay',
         name='cmd_vel_relay',
+        output='log',
         parameters=[{
             'use_sim_time': use_sim_time,
             'input_topic': '/cmd_vel_smoothed',
@@ -145,6 +146,7 @@ def generate_launch_description():
         package='tb3_slam',
         executable='episode_manager',
         name='episode_manager',
+        ros_arguments=['--log-level', 'info'],
         parameters=[{
             'use_sim_time': use_sim_time,
             'episode_file': episode_file,
@@ -160,6 +162,7 @@ def generate_launch_description():
         package='tb3_exploration',
         executable='frontier_explorer',
         name='frontier_explorer',
+        ros_arguments=['--log-level', 'info'],
         parameters=[{
             'use_sim_time': use_sim_time,
             'coverage_threshold': coverage_threshold,
@@ -174,6 +177,7 @@ def generate_launch_description():
         package='tb3_reinforced_exploration',
         executable='reinforced_exploration',
         name='rl_agent',
+        ros_arguments=['--log-level', 'info'],
         parameters=[{
             'use_sim_time': use_sim_time,
             'coverage_threshold': coverage_threshold,
@@ -185,11 +189,14 @@ def generate_launch_description():
     )
 
     exploration_delayed = TimerAction(
-        period=12.0,
+        period=20.0,
         actions=[frontier_explorer, rl_agent],
     )
 
     return LaunchDescription([
+        # Suppress verbose logs from Cartographer, Nav2, robot_state_publisher etc.
+        # Only WARN and above from external nodes will appear on the terminal.
+        SetEnvironmentVariable('RCUTILS_LOGGING_SEVERITY_THRESHOLD', 'WARN'),
         set_env_vars_resources,
         gzserver_cmd,
         gzclient_cmd,

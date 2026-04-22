@@ -6,10 +6,14 @@ import numpy as np
 from nav_msgs.msg import OccupancyGrid
 
 # Occupancy value ranges
+# NOTE: WALL_MIN lowered from 90 → 75 as an experiment. Cartographer appears to
+# store some wall pixels in the 75–89 band that were previously treated as
+# UNCERTAIN, which let frontier cells keep a "wall" neighbour under the
+# stricter rule. Tightening the wall threshold treats those cells as walls.
 FREE_MAX = 25        # cell value 0–25   → free
-FRONTIER_MIN = 26    # cell value 26–89  → uncertain / frontier
-FRONTIER_MAX = 89
-WALL_MIN = 90        # cell value 90–100 → wall
+FRONTIER_MIN = 26    # cell value 26–74  → uncertain / frontier
+FRONTIER_MAX = 74
+WALL_MIN = 75        # cell value 75–100 → wall
 UNKNOWN = -1
 
 

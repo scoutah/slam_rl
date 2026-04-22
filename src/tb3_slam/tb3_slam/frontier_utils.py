@@ -20,88 +20,76 @@ def find_frontiers(
 ) -> list[tuple[int, int]]:
     """Return all frontier cells (row, col) reachable from the robot.
 
-    When ``robot_grid_pos`` is given, runs a BFS through FREE cells starting at
-    the robot. Any UNKNOWN (-1) cell adjacent to a BFS-reachable FREE cell is
-    a frontier. Only UNKNOWN cells are returned — UNCERTAIN (26–89) cells are
-    NOT frontiers because walls in the SLAM map can have values in that range
-    and must never be navigation targets.
+    A frontier is a FREE cell (0–25) that has at least one UNCERTAIN (26–89)
+    neighbour in the 4 cardinal directions. FREE cells are guaranteed
+    reachable and directly usable as Nav2 goals — no centroid walk-out needed.
 
-    Without ``robot_grid_pos``, falls back to the original global scan.
+    Phantom frontiers (UNKNOWN cells behind walls reached via BFS leaking
+    through UNCERTAIN wall pixels) no longer appear: BFS traverses FREE cells
+    only and never passes through UNCERTAIN, so it cannot leak outside the
+    walled area.
     """
     rows, cols = grid.shape
     cardinal = [(-1, 0), (1, 0), (0, -1), (0, 1)]
     _seeds: set[tuple[int, int]] = free_seeds if free_seeds is not None else set()
 
+    def _is_free(r: int, c: int) -> bool:
+        if (r, c) in _seeds:
+            return True
+        v = grid[r, c]
+        return 0 <= v <= FREE_MAX
+
+    def _has_uncertain_neighbour(r: int, c: int) -> bool:
+        for dr, dc in cardinal:
+            nr, nc = r + dr, c + dc
+            if 0 <= nr < rows and 0 <= nc < cols:
+                v = grid[nr, nc]
+                if FRONTIER_MIN <= v <= FRONTIER_MAX:
+                    return True
+        return False
+
     # ── BFS path ────────────────────────────────────────────────────────
-    # BFS traverses every known non-wall cell (FREE + UNCERTAIN). In this
-    # SLAM setup, Cartographer often leaves walls in the UNCERTAIN range
-    # (26–89) without ever reaching WALL_MIN, so a BFS limited to FREE
-    # gets trapped inside the explored region and never sees the UNKNOWN
-    # boundary behind the “walls”. Including UNCERTAIN cells in traversal
-    # lets us still find UNKNOWN frontiers; Nav2's costmap handles actual
-    # wall avoidance when we navigate to a FREE cell near the frontier.
     if robot_grid_pos is not None:
         sr, sc = robot_grid_pos
         if 0 <= sr < rows and 0 <= sc < cols:
-            def _is_traversable(r: int, c: int) -> bool:
-                if (r, c) in _seeds:
-                    return True
-                v = grid[r, c]
-                return v != UNKNOWN and v < WALL_MIN
-
             visited: set[tuple[int, int]] = set()
             frontier_set: set[tuple[int, int]] = set()
             queue: deque[tuple[int, int]] = deque()
 
-            if _is_traversable(sr, sc):
+            if _is_free(sr, sc):
                 queue.append((sr, sc))
                 visited.add((sr, sc))
             else:
-                # Robot in unknown cell; seed from any traversable cardinal neighbour.
+                # Robot cell isn't FREE yet — seed from free cardinal neighbours.
                 for dr, dc in cardinal:
                     nr, nc = sr + dr, sc + dc
                     if (0 <= nr < rows and 0 <= nc < cols
-                            and _is_traversable(nr, nc) and (nr, nc) not in visited):
+                            and _is_free(nr, nc) and (nr, nc) not in visited):
                         queue.append((nr, nc))
                         visited.add((nr, nc))
 
             while queue:
                 r, c = queue.popleft()
+                if _has_uncertain_neighbour(r, c):
+                    frontier_set.add((r, c))
                 for dr, dc in cardinal:
                     nr, nc = r + dr, c + dc
                     if not (0 <= nr < rows and 0 <= nc < cols):
                         continue
-                    nval = grid[nr, nc]
-                    if nval == UNKNOWN:
-                        frontier_set.add((nr, nc))
-                    elif (nr, nc) not in visited and _is_traversable(nr, nc):
+                    if (nr, nc) in visited:
+                        continue
+                    if _is_free(nr, nc):
                         visited.add((nr, nc))
                         queue.append((nr, nc))
 
             return list(frontier_set)
 
     # ── Fallback: global scan (no robot position available) ─────────────
-    frontiers = []
+    frontiers: list[tuple[int, int]] = []
     for r in range(rows):
         for c in range(cols):
-            cell = grid[r, c]
-            if cell == UNKNOWN:
-                has_known = any(
-                    0 <= r + dr < rows and 0 <= c + dc < cols
-                    and 0 <= grid[r + dr, c + dc] < WALL_MIN
-                    for dr, dc in cardinal
-                )
-                if has_known:
-                    frontiers.append((r, c))
-            elif FRONTIER_MIN <= cell <= FRONTIER_MAX:
-                has_free = any(
-                    0 <= r + dr < rows and 0 <= c + dc < cols
-                    and (0 <= grid[r + dr, c + dc] <= FREE_MAX
-                         or (r + dr, c + dc) in _seeds)
-                    for dr, dc in cardinal
-                )
-                if has_free:
-                    frontiers.append((r, c))
+            if _is_free(r, c) and _has_uncertain_neighbour(r, c):
+                frontiers.append((r, c))
     return frontiers
 
 

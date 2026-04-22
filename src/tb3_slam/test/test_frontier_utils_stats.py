@@ -54,6 +54,36 @@ def test_free_cell_with_wall_neighbour_is_not_a_frontier():
     assert stats['frontiers'] == []
 
 
+def test_free_cell_with_second_degree_wall_is_not_a_frontier():
+    # Col 1 FREE cells touch UNCERTAIN at col 0; walls sit at col 3,
+    # exactly 2 cells away. The 5×5 wall exclusion must reject them.
+    grid = [
+        [50, 0, 0, 95],
+        [50, 0, 0, 95],
+        [50, 0, 0, 95],
+    ]
+    msg = _make_grid(grid)
+    _, stats = centroids_from_map_debug(msg, robot_grid_pos=(1, 1))
+
+    # Col 1 rejected (wall 2 cells away at col 3). Col 2 has no UNCERTAIN
+    # neighbour. So nothing qualifies.
+    assert stats['frontiers'] == []
+
+
+def test_free_cell_with_wall_three_cells_away_is_a_frontier():
+    # Walls now 3 cells away at col 4 — outside the 5×5 window. Col 1
+    # FREE cells should qualify as frontiers again.
+    grid = [
+        [50, 0, 0, 0, 95],
+        [50, 0, 0, 0, 95],
+        [50, 0, 0, 0, 95],
+    ]
+    msg = _make_grid(grid)
+    _, stats = centroids_from_map_debug(msg, robot_grid_pos=(1, 1))
+
+    assert set(stats['frontiers']) == {(0, 1), (1, 1), (2, 1)}
+
+
 def test_phantom_unknown_beyond_wall_is_not_a_frontier():
     # FREE room on the left; WALL in the middle; UNCERTAIN+UNKNOWN to the
     # right (simulating phantom territory behind a wall). The old rule would

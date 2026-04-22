@@ -24,11 +24,11 @@ def find_frontiers(
 ) -> list[tuple[int, int]]:
     """Return all frontier cells (row, col) reachable from the robot.
 
-    A frontier is a FREE cell (0–25) that has at least one UNCERTAIN (26–89)
-    cardinal neighbour *and* no WALL (90–100) cardinal neighbour. Ruling out
-    wall neighbours sacrifices a few legitimate frontiers along obstacles but
-    eliminates the border cells that hug walls — those goals tend to plan
-    badly and sit right on Nav2's inflation layer.
+    A frontier is a FREE cell (0–25) that has at least one UNCERTAIN
+    cardinal neighbour *and* no WALL cell within Chebyshev distance 2
+    (5×5 window). Extending the wall exclusion to 2nd-degree neighbours
+    gives goals a safety margin away from Nav2's inflation layer, at the
+    cost of dropping a few legitimate frontiers right next to obstacles.
 
     Phantom frontiers (UNKNOWN cells behind walls reached via BFS leaking
     through UNCERTAIN wall pixels) no longer appear: BFS traverses FREE cells
@@ -52,11 +52,20 @@ def find_frontiers(
             if not (0 <= nr < rows and 0 <= nc < cols):
                 continue
             v = grid[nr, nc]
-            if v >= WALL_MIN:
-                return False
             if FRONTIER_MIN <= v <= FRONTIER_MAX:
                 has_uncertain = True
-        return has_uncertain
+        if not has_uncertain:
+            return False
+        for dr in range(-2, 3):
+            for dc in range(-2, 3):
+                if dr == 0 and dc == 0:
+                    continue
+                nr, nc = r + dr, c + dc
+                if not (0 <= nr < rows and 0 <= nc < cols):
+                    continue
+                if grid[nr, nc] >= WALL_MIN:
+                    return False
+        return True
 
     # ── BFS path ────────────────────────────────────────────────────────
     if robot_grid_pos is not None:

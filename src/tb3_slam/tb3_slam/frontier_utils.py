@@ -21,8 +21,10 @@ def find_frontiers(
     """Return all frontier cells (row, col) reachable from the robot.
 
     A frontier is a FREE cell (0–25) that has at least one UNCERTAIN (26–89)
-    neighbour in the 4 cardinal directions. FREE cells are guaranteed
-    reachable and directly usable as Nav2 goals — no centroid walk-out needed.
+    cardinal neighbour *and* no WALL (90–100) cardinal neighbour. Ruling out
+    wall neighbours sacrifices a few legitimate frontiers along obstacles but
+    eliminates the border cells that hug walls — those goals tend to plan
+    badly and sit right on Nav2's inflation layer.
 
     Phantom frontiers (UNKNOWN cells behind walls reached via BFS leaking
     through UNCERTAIN wall pixels) no longer appear: BFS traverses FREE cells
@@ -39,14 +41,18 @@ def find_frontiers(
         v = grid[r, c]
         return 0 <= v <= FREE_MAX
 
-    def _has_uncertain_neighbour(r: int, c: int) -> bool:
+    def _is_frontier(r: int, c: int) -> bool:
+        has_uncertain = False
         for dr, dc in cardinal:
             nr, nc = r + dr, c + dc
-            if 0 <= nr < rows and 0 <= nc < cols:
-                v = grid[nr, nc]
-                if FRONTIER_MIN <= v <= FRONTIER_MAX:
-                    return True
-        return False
+            if not (0 <= nr < rows and 0 <= nc < cols):
+                continue
+            v = grid[nr, nc]
+            if v >= WALL_MIN:
+                return False
+            if FRONTIER_MIN <= v <= FRONTIER_MAX:
+                has_uncertain = True
+        return has_uncertain
 
     # ── BFS path ────────────────────────────────────────────────────────
     if robot_grid_pos is not None:
@@ -70,7 +76,7 @@ def find_frontiers(
 
             while queue:
                 r, c = queue.popleft()
-                if _has_uncertain_neighbour(r, c):
+                if _is_frontier(r, c):
                     frontier_set.add((r, c))
                 for dr, dc in cardinal:
                     nr, nc = r + dr, c + dc
@@ -88,7 +94,7 @@ def find_frontiers(
     frontiers: list[tuple[int, int]] = []
     for r in range(rows):
         for c in range(cols):
-            if _is_free(r, c) and _has_uncertain_neighbour(r, c):
+            if _is_free(r, c) and _is_frontier(r, c):
                 frontiers.append((r, c))
     return frontiers
 

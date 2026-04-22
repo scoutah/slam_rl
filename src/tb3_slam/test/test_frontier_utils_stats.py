@@ -40,6 +40,20 @@ def test_stats_frontiers_empty_when_no_uncertain():
     assert stats['frontiers'] == []
 
 
+def test_free_cell_with_wall_neighbour_is_not_a_frontier():
+    # Col 1 FREE cells touch both UNCERTAIN (col 0) AND a WALL (col 2).
+    # The wall neighbour disqualifies them, so no frontiers are expected.
+    grid = [
+        [50, 0, 95],
+        [50, 0, 95],
+        [50, 0, 95],
+    ]
+    msg = _make_grid(grid)
+    _, stats = centroids_from_map_debug(msg, robot_grid_pos=(1, 1))
+
+    assert stats['frontiers'] == []
+
+
 def test_phantom_unknown_beyond_wall_is_not_a_frontier():
     # FREE room on the left; WALL in the middle; UNCERTAIN+UNKNOWN to the
     # right (simulating phantom territory behind a wall). The old rule would

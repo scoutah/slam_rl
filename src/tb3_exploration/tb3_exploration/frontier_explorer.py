@@ -12,7 +12,7 @@ from tf2_ros import Buffer, TransformListener
 from action_msgs.msg import GoalStatus
 from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import OccupancyGrid
-from nav2_msgs.action import NavigateToPose
+from nav2_msgs.action import ComputePathToPose, NavigateToPose
 from rclpy.action import ActionClient
 from rclpy.action.client import ClientGoalHandle
 from rclpy.node import Node
@@ -78,7 +78,19 @@ class FrontierExplorer(Node):
         self._tf_listener = TransformListener(self._tf_buffer, self)
         self._map_sub = self.create_subscription(OccupancyGrid, '/map', self._map_callback, 10)
         self._nav_client: ActionClient = ActionClient(self, NavigateToPose, 'navigate_to_pose')
+        self._planner_client: ActionClient = ActionClient(
+            self, ComputePathToPose, 'compute_path_to_pose'
+        )
         self._viz_pub = self.create_publisher(MarkerArray, '/frontiers_viz', 10)
+
+        # Ranking state. We ask Nav2 for a full plan to every candidate centroid
+        # so we can rank by real path length (respects walls) instead of
+        # Euclidean distance. Ranking is async: one ComputePathToPose goal per
+        # candidate; when all results are in we sort and dispatch the nearest.
+        self._ranking_in_progress = False
+        self._ranking_map: OccupancyGrid | None = None
+        self._ranking_pending: int = 0
+        self._ranking_results: list[tuple[tuple[int, int], float]] = []
 
         self.get_logger().info('FrontierExplorer ready – waiting for /map ...')
 
@@ -118,14 +130,10 @@ class FrontierExplorer(Node):
             self._supervise_active_goal()
             return
 
+        if self._ranking_in_progress:
+            return
+
         fresh = [c for c in centroids if c not in self._tried]
-        # Always head to the Euclidean-nearest fresh centroid. The remaining
-        # centroids stay in the queue as fallbacks for when Nav2 aborts.
-        if fresh and robot_pos is not None:
-            def _dist_to_robot(cell: tuple[int, int]) -> float:
-                wx, wy = grid_to_world(cell, msg)
-                return math.hypot(wx - robot_pos[0], wy - robot_pos[1])
-            fresh.sort(key=_dist_to_robot)
         self.get_logger().info(
             f'[frontier] {len(centroids)} centroid(s), {len(fresh)} fresh',
             throttle_duration_sec=5.0,
@@ -138,9 +146,7 @@ class FrontierExplorer(Node):
             self._log_pipeline_stats(stats)
 
         if fresh:
-            self._centroid_queue = fresh
-            self._current_map = msg
-            self._try_next_goal()
+            self._start_ranking(fresh, msg)
 
     def _log_pipeline_stats(self, stats: dict) -> None:
         log = self.get_logger()
@@ -176,6 +182,116 @@ class FrontierExplorer(Node):
         except Exception as e:
             self.get_logger().warning(f'[tf] Could not get robot position: {e}')
             return None
+
+    # ------------------------------------------------------------------
+    # Nav2-based centroid ranking
+    # ------------------------------------------------------------------
+
+    def _start_ranking(
+        self,
+        fresh: list[tuple[int, int]],
+        map_msg: OccupancyGrid,
+    ) -> None:
+        """Ask Nav2 for a real plan to every fresh centroid, then dispatch nearest.
+
+        If the planner action server isn't up yet we fall back to Euclidean
+        sorting so the robot still moves while Nav2 is initialising.
+        """
+        if not self._planner_client.server_is_ready():
+            robot = self._get_robot_pos()
+            if robot is not None:
+                fresh.sort(
+                    key=lambda c: math.hypot(
+                        grid_to_world(c, map_msg)[0] - robot[0],
+                        grid_to_world(c, map_msg)[1] - robot[1],
+                    )
+                )
+            self.get_logger().warning(
+                '[rank] compute_path_to_pose not ready — using Euclidean fallback',
+                throttle_duration_sec=5.0,
+            )
+            self._centroid_queue = fresh
+            self._current_map = map_msg
+            self._try_next_goal()
+            return
+
+        self._ranking_in_progress = True
+        self._ranking_map = map_msg
+        self._ranking_results = []
+        self._ranking_pending = len(fresh)
+
+        for cell in fresh:
+            wx, wy = grid_to_world(cell, map_msg)
+            goal = ComputePathToPose.Goal()
+            pose = PoseStamped()
+            pose.header.frame_id = 'map'
+            pose.header.stamp = self.get_clock().now().to_msg()
+            pose.pose.position.x = wx
+            pose.pose.position.y = wy
+            pose.pose.orientation.w = 1.0
+            goal.goal = pose
+            goal.use_start = False  # let Nav2 use the current robot pose
+            future = self._planner_client.send_goal_async(goal)
+            future.add_done_callback(
+                lambda f, c=cell: self._on_rank_goal_response(f, c)
+            )
+
+    def _on_rank_goal_response(self, future: Future, cell: tuple[int, int]) -> None:
+        handle: ClientGoalHandle = future.result()
+        if not handle.accepted:
+            self._record_rank_result(cell, None)
+            return
+        handle.get_result_async().add_done_callback(
+            lambda f, c=cell: self._on_rank_result(f, c)
+        )
+
+    def _on_rank_result(self, future: Future, cell: tuple[int, int]) -> None:
+        wrapper = future.result()
+        status: int = wrapper.status
+        length: float | None = None
+        if status == GoalStatus.STATUS_SUCCEEDED:
+            path = wrapper.result.path
+            if wrapper.result.error_code == 0 and len(path.poses) >= 2:
+                length = 0.0
+                prev = path.poses[0].pose.position
+                for ps in path.poses[1:]:
+                    cur = ps.pose.position
+                    length += math.hypot(cur.x - prev.x, cur.y - prev.y)
+                    prev = cur
+        self._record_rank_result(cell, length)
+
+    def _record_rank_result(
+        self,
+        cell: tuple[int, int],
+        length: float | None,
+    ) -> None:
+        if length is not None:
+            self._ranking_results.append((cell, length))
+        self._ranking_pending -= 1
+        if self._ranking_pending > 0:
+            return
+        self._finish_ranking()
+
+    def _finish_ranking(self) -> None:
+        reachable = sorted(self._ranking_results, key=lambda t: t[1])
+        ranked = [cell for cell, _ in reachable]
+        if reachable:
+            self.get_logger().info(
+                f'[rank] {len(ranked)} reachable centroids '
+                f'(nearest path_len={reachable[0][1]:.2f}m)'
+            )
+        else:
+            self.get_logger().warning(
+                '[rank] No centroid is reachable — waiting for next map update'
+            )
+        self._ranking_in_progress = False
+        if not ranked:
+            self._ranking_map = None
+            return
+        self._centroid_queue = ranked
+        self._current_map = self._ranking_map
+        self._ranking_map = None
+        self._try_next_goal()
 
     # ------------------------------------------------------------------
     # Navigation helpers

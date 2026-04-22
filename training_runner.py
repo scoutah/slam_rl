@@ -40,7 +40,7 @@ INTER_EPISODE_PAUSE = 3  # seconds to wait after shutdown before next launch
 DEFAULT_RESULT_FILE = Path(__file__).resolve().parent / 'results' / 'training_results.csv'
 
 # ROS node name substrings whose log lines are suppressed in the terminal
-LOG_FILTER: list[str] = ['cartographer-node-8']
+LOG_FILTER: list[str] = ['cartographer_node-8', 'controller_server-12']
 
 
 # ---------------------------------------------------------------------------
@@ -125,7 +125,7 @@ def build_launch_cmd(
         f'max_episode_duration:={timeout}',
     ]
     if headless:
-        cmd.append('gz_headless:=true')
+        cmd.append('headless:=true')
     return cmd
 
 
@@ -151,11 +151,13 @@ def wait_for_episode_done(
 def kill_launch(proc: subprocess.Popen) -> None:
     """Send SIGINT to the launch process group (graceful), then SIGKILL if needed."""
     if proc.poll() is not None:
+        _kill_stale_ros_processes()
         return
     try:
         pgid = os.getpgid(proc.pid)
         os.killpg(pgid, signal.SIGINT)
     except ProcessLookupError:
+        _kill_stale_ros_processes()
         return
     try:
         proc.wait(timeout=SHUTDOWN_GRACE)
@@ -165,6 +167,43 @@ def kill_launch(proc: subprocess.Popen) -> None:
         except ProcessLookupError:
             pass
         proc.wait()
+    _kill_stale_ros_processes()
+
+
+# Processes that routinely survive SIGINT to the launch process group and keep
+# publishing topics (including the latched /map) into the next episode. We
+# match by command-line substring via pkill -f. Order doesn't matter.
+_STALE_PATTERNS = [
+    'cartographer_node',
+    'ros_gz_bridge',
+    'parameter_bridge',
+    'controller_server',
+    'planner_server',
+    'smoother_server',
+    'behavior_server',
+    'bt_navigator',
+    'waypoint_follower',
+    'velocity_smoother',
+    'lifecycle_manager',
+    'gz sim',
+    'gzserver',
+    'gzclient',
+    'frontier_explorer',
+    'reinforced_exploration',
+    'episode_manager',
+    'cmd_vel_relay',
+    'robot_state_publisher',
+]
+
+
+def _kill_stale_ros_processes() -> None:
+    for pat in _STALE_PATTERNS:
+        subprocess.run(
+            ['pkill', '-9', '-f', pat],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -239,8 +278,8 @@ def main() -> None:
                         help='Number of episodes to run (default: 10)')
     parser.add_argument('--timeout', type=float, default=600.0,
                         help='Max episode duration in seconds (default: 600)')
-    parser.add_argument('--threshold', type=float, default=0.95,
-                        help='Coverage threshold to end episode (default: 0.95)')
+    parser.add_argument('--threshold', type=float, default=0.99,
+                        help='Coverage threshold to end episode (default: 0.99)')
     parser.add_argument('--headless', action='store_true',
                         help='Skip Gazebo GUI client')
     parser.add_argument('--result-file', type=Path, default=DEFAULT_RESULT_FILE,

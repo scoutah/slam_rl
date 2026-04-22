@@ -91,6 +91,10 @@ class FrontierExplorer(Node):
         self._ranking_map: OccupancyGrid | None = None
         self._ranking_pending: int = 0
         self._ranking_results: list[tuple[tuple[int, int], float]] = []
+        self._ranking_fresh: list[tuple[int, int]] = []
+        self._ranking_start_time: float | None = None
+        self._RANKING_TIMEOUT_S = 8.0
+        self.create_timer(1.0, self._supervise_ranking)
 
         self.get_logger().info('FrontierExplorer ready – waiting for /map ...')
 
@@ -219,6 +223,8 @@ class FrontierExplorer(Node):
         self._ranking_map = map_msg
         self._ranking_results = []
         self._ranking_pending = len(fresh)
+        self._ranking_fresh = list(fresh)
+        self._ranking_start_time = self.get_clock().now().nanoseconds * 1e-9
 
         for cell in fresh:
             wx, wy = grid_to_world(cell, map_msg)
@@ -285,6 +291,8 @@ class FrontierExplorer(Node):
                 '[rank] No centroid is reachable — waiting for next map update'
             )
         self._ranking_in_progress = False
+        self._ranking_start_time = None
+        self._ranking_fresh = []
         if not ranked:
             self._ranking_map = None
             return
@@ -292,6 +300,39 @@ class FrontierExplorer(Node):
         self._current_map = self._ranking_map
         self._ranking_map = None
         self._try_next_goal()
+
+    def _supervise_ranking(self) -> None:
+        """Watchdog: if Nav2 stops responding to ComputePathToPose the ranking
+        would stall forever and the robot would sit idle. After the timeout
+        we salvage whatever results arrived; if none did, fall back to
+        Euclidean order over the original fresh list so something still ships.
+        """
+        if not self._ranking_in_progress or self._ranking_start_time is None:
+            return
+        elapsed = self.get_clock().now().nanoseconds * 1e-9 - self._ranking_start_time
+        if elapsed < self._RANKING_TIMEOUT_S:
+            return
+        self.get_logger().warning(
+            f'[rank] TIMEOUT after {elapsed:.0f}s — '
+            f'{len(self._ranking_results)}/{len(self._ranking_fresh)} replies received, '
+            'falling back to Euclidean'
+        )
+        if not self._ranking_results and self._ranking_map is not None:
+            robot = self._get_robot_pos()
+            if robot is not None:
+                map_msg = self._ranking_map
+                self._ranking_results = [
+                    (
+                        cell,
+                        math.hypot(
+                            grid_to_world(cell, map_msg)[0] - robot[0],
+                            grid_to_world(cell, map_msg)[1] - robot[1],
+                        ),
+                    )
+                    for cell in self._ranking_fresh
+                ]
+        self._ranking_pending = 0
+        self._finish_ranking()
 
     # ------------------------------------------------------------------
     # Navigation helpers

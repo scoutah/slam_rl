@@ -28,10 +28,16 @@ class EpisodeManager(Node):
         self.declare_parameter('coverage_threshold', 0.99)
         self.declare_parameter('episode_file', '/tmp/slam_episode_done')
         self.declare_parameter('max_episode_duration', 600.0)  # seconds
+        # Ignore /map messages for this many seconds after launch. A previous
+        # episode's cartographer that survives SIGINT keeps publishing the old
+        # (nearly complete) map on /map with TRANSIENT_LOCAL QoS, which would
+        # make the new episode terminate instantly at ~99% coverage.
+        self.declare_parameter('startup_grace_s', 15.0)
 
         self.threshold: float = self.get_parameter('coverage_threshold').value
         self.episode_file: str = self.get_parameter('episode_file').value
         self.max_duration: float = self.get_parameter('max_episode_duration').value
+        self.startup_grace_s: float = self.get_parameter('startup_grace_s').value
 
         expected = load_expected_cells()
         if expected is None:
@@ -66,6 +72,14 @@ class EpisodeManager(Node):
 
     def _map_callback(self, msg: OccupancyGrid) -> None:
         if self._done:
+            return
+
+        elapsed = time.time() - self._start_time
+        if elapsed < self.startup_grace_s:
+            self.get_logger().info(
+                f'[warmup] ignoring /map ({self.startup_grace_s - elapsed:.0f}s left)',
+                throttle_duration_sec=5.0,
+            )
             return
 
         # Fall back to total map size if no world metadata was available

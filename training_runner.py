@@ -151,11 +151,13 @@ def wait_for_episode_done(
 def kill_launch(proc: subprocess.Popen) -> None:
     """Send SIGINT to the launch process group (graceful), then SIGKILL if needed."""
     if proc.poll() is not None:
+        _kill_stale_ros_processes()
         return
     try:
         pgid = os.getpgid(proc.pid)
         os.killpg(pgid, signal.SIGINT)
     except ProcessLookupError:
+        _kill_stale_ros_processes()
         return
     try:
         proc.wait(timeout=SHUTDOWN_GRACE)
@@ -165,6 +167,43 @@ def kill_launch(proc: subprocess.Popen) -> None:
         except ProcessLookupError:
             pass
         proc.wait()
+    _kill_stale_ros_processes()
+
+
+# Processes that routinely survive SIGINT to the launch process group and keep
+# publishing topics (including the latched /map) into the next episode. We
+# match by command-line substring via pkill -f. Order doesn't matter.
+_STALE_PATTERNS = [
+    'cartographer_node',
+    'ros_gz_bridge',
+    'parameter_bridge',
+    'controller_server',
+    'planner_server',
+    'smoother_server',
+    'behavior_server',
+    'bt_navigator',
+    'waypoint_follower',
+    'velocity_smoother',
+    'lifecycle_manager',
+    'gz sim',
+    'gzserver',
+    'gzclient',
+    'frontier_explorer',
+    'reinforced_exploration',
+    'episode_manager',
+    'cmd_vel_relay',
+    'robot_state_publisher',
+]
+
+
+def _kill_stale_ros_processes() -> None:
+    for pat in _STALE_PATTERNS:
+        subprocess.run(
+            ['pkill', '-9', '-f', pat],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
 
 
 # ---------------------------------------------------------------------------

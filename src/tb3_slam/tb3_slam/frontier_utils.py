@@ -94,19 +94,20 @@ def find_frontiers(
 
 
 def find_groups(frontiers: list[tuple[int, int]]) -> list[list[tuple[int, int]]]:
-    """Group frontier cells into connected clusters (2nd-degree connectivity, DFS).
+    """Group frontier cells into connected clusters (8-connectivity, DFS).
 
-    Two frontier cells belong to the same group if they are within Chebyshev
-    distance 2 of each other (5×5 window).  This merges clusters separated by
-    a one-cell gap that 8-connectivity would split.
+    Two frontier cells belong to the same group only if they are direct
+    neighbours (Chebyshev distance 1 / 3×3 window). A one-cell gap now
+    splits clusters instead of merging them, so the big frontier ring along
+    a wall breaks into several smaller, separately-navigable groups.
     """
     frontier_set = set(frontiers)
     visited: set[tuple[int, int]] = set()
     groups = []
     offsets = [
         (dr, dc)
-        for dr in range(-2, 3)
-        for dc in range(-2, 3)
+        for dr in range(-1, 2)
+        for dc in range(-1, 2)
         if (dr, dc) != (0, 0)
     ]
 

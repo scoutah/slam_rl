@@ -109,6 +109,8 @@ class FrontierExplorer(Node):
                 self._current_target,
                 msg,
                 stamp=self.get_clock().now().to_msg(),
+                centroids=centroids,
+                goal_color=(0.0, 1.0, 0.0),
             )
         )
 
@@ -117,6 +119,13 @@ class FrontierExplorer(Node):
             return
 
         fresh = [c for c in centroids if c not in self._tried]
+        # Always head to the Euclidean-nearest fresh centroid. The remaining
+        # centroids stay in the queue as fallbacks for when Nav2 aborts.
+        if fresh and robot_pos is not None:
+            def _dist_to_robot(cell: tuple[int, int]) -> float:
+                wx, wy = grid_to_world(cell, msg)
+                return math.hypot(wx - robot_pos[0], wy - robot_pos[1])
+            fresh.sort(key=_dist_to_robot)
         self.get_logger().info(
             f'[frontier] {len(centroids)} centroid(s), {len(fresh)} fresh',
             throttle_duration_sec=5.0,

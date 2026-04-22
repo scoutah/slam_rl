@@ -87,3 +87,32 @@ def test_frontier_marker_has_identity_orientation():
     arr = build_frontier_markers([(0, 0)], None, msg)
     frontier_marker = next(m for m in arr.markers if m.id == 0)
     assert frontier_marker.pose.orientation.w == 1.0
+
+
+def test_centroids_parameter_adds_blue_cube_list():
+    msg = _make_map(resolution=0.1)
+    arr = build_frontier_markers([], None, msg, centroids=[(1, 1), (2, 2)])
+    assert len(arr.markers) == 3
+    centroid_marker = next(m for m in arr.markers if m.id == 2)
+    assert centroid_marker.type == Marker.CUBE_LIST
+    assert centroid_marker.action == Marker.ADD
+    assert centroid_marker.color.r == 0.0
+    assert centroid_marker.color.g == 0.0
+    assert centroid_marker.color.b == 1.0
+    assert len(centroid_marker.points) == 2
+
+
+def test_centroids_none_omits_third_marker():
+    msg = _make_map()
+    arr = build_frontier_markers([], None, msg)
+    assert len(arr.markers) == 2
+    assert {m.id for m in arr.markers} == {0, 1}
+
+
+def test_goal_color_override_sets_rgb():
+    msg = _make_map()
+    arr = build_frontier_markers([], (0, 0), msg, goal_color=(0.0, 1.0, 0.0))
+    goal_marker = next(m for m in arr.markers if m.id == 1)
+    assert goal_marker.color.r == 0.0
+    assert goal_marker.color.g == 1.0
+    assert goal_marker.color.b == 0.0

@@ -9,6 +9,12 @@ WORLD_META_FILE = Path('/tmp/slam_world_meta.json')
 # Must match the SLAM/Cartographer map resolution
 MAP_RESOLUTION: float = 0.05  # metres per cell
 
+# Minimum free-path width (door gap + corridor). TB3 Burger footprint is ~0.22 m
+# but Nav2's default inflation radius of ~0.55 m needs > 2x inflation for the
+# planner to route through a passage, i.e. > 1.1 m. Anything smaller produces
+# rooms the robot can see but cannot enter.
+MIN_PATH_WIDTH: float = 1.1
+
 
 def generate_random_world(file_path: str) -> tuple[bool, int]:
     """
@@ -97,8 +103,13 @@ def generate_random_world(file_path: str) -> tuple[bool, int]:
         rooms: List[Tuple[float, float, float, float]] = [(-half, half, -half, half)]
 
         target_splits = random.randint(3, 5)
-        min_room_span = 1.4
-        door_width = 0.9
+        # Rooms must be wide enough to (a) fit a door of MIN_PATH_WIDTH and
+        # (b) still leave clearance on either side of the door. Buffer of
+        # 0.4 m keeps approach corridors comfortably wider than the door.
+        min_room_span = max(1.4, MIN_PATH_WIDTH + 0.4)
+        door_width = MIN_PATH_WIDTH
+        # Any wall sub-segment shorter than this collapses into the door, so
+        # the actual opening can only ever be ≥ door_width.
         min_segment = 0.25
 
         split_count = 0

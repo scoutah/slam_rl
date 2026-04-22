@@ -125,7 +125,7 @@ def build_launch_cmd(
         f'max_episode_duration:={timeout}',
     ]
     if headless:
-        cmd.append('gz_headless:=true')
+        cmd.append('headless:=true')
     return cmd
 
 

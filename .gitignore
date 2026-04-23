@@ -2,5 +2,8 @@ build/
 install/
 log/
 
+worlds/
+results/
+
 .vscode
 __pycache__/

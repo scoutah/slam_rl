@@ -2,18 +2,18 @@
 """
 Episodic SLAM training runner.
 
-Launches the simulation once per episode, waits until the episode_manager
-signals completion (95 % map coverage or timeout), then kills everything
-and starts a fresh episode with a newly generated world.
+Generates ONE world per script invocation and reuses it for all episodes.
+Results are written to a per-run CSV file in results/.
 
 Usage:
     python3 training_runner.py [--mode classic|rl] [--episodes N]
                                [--timeout SECONDS] [--threshold FLOAT]
-                               [--headless]
+                               [--headless] [--world PATH]
 
 Examples:
     python3 training_runner.py --mode classic --episodes 20
     python3 training_runner.py --mode rl --episodes 100 --headless
+    python3 training_runner.py --world worlds/abc123.sdf --episodes 5
 """
 
 import argparse
@@ -21,11 +21,13 @@ import csv
 import io
 import os
 import re
+import shutil
 import signal
 import subprocess
 import sys
 import threading
 import time
+import uuid
 from datetime import datetime
 from pathlib import Path
 
@@ -37,7 +39,10 @@ from pathlib import Path
 EPISODE_FILE = Path('/tmp/slam_episode_done')
 SHUTDOWN_GRACE = 15      # seconds to wait for ros2 launch to exit cleanly
 INTER_EPISODE_PAUSE = 3  # seconds to wait after shutdown before next launch
-DEFAULT_RESULT_FILE = Path(__file__).resolve().parent / 'results' / 'training_results.csv'
+
+PROJECT_ROOT = Path(__file__).resolve().parent
+RESULTS_DIR = PROJECT_ROOT / 'results'
+WORLDS_DIR = PROJECT_ROOT / 'worlds'
 
 # ROS node name substrings whose log lines are suppressed in the terminal
 LOG_FILTER: list[str] = ['cartographer_node-8', 'controller_server-12']
@@ -68,6 +73,38 @@ def start_filtered_readers(proc: subprocess.Popen) -> list[threading.Thread]:
 
 
 # ---------------------------------------------------------------------------
+# World generation
+# ---------------------------------------------------------------------------
+
+def prepare_world(world_arg: str | None, run_id: str) -> Path:
+    """
+    Return the path to the .sdf world file to use for this run.
+
+    If *world_arg* is given, use that file directly (no copy).
+    Otherwise generate a new random world via tb3_slam.utils and save it
+    to worlds/<run_id>.sdf.
+    """
+    if world_arg:
+        p = Path(world_arg).resolve()
+        if not p.exists():
+            print(f'[runner] ERROR: world file not found: {p}', file=sys.stderr)
+            sys.exit(1)
+        return p
+
+    # Import here so the script can still --help without a colcon workspace
+    from tb3_slam.utils import generate_random_world
+
+    WORLDS_DIR.mkdir(parents=True, exist_ok=True)
+    world_path = WORLDS_DIR / f'{run_id}.sdf'
+    success, _ = generate_random_world(str(world_path))
+    if not success:
+        print('[runner] ERROR: world generation failed', file=sys.stderr)
+        sys.exit(1)
+    print(f'[runner] World saved to {world_path}')
+    return world_path
+
+
+# ---------------------------------------------------------------------------
 # Result logging
 # ---------------------------------------------------------------------------
 
@@ -75,6 +112,13 @@ def _parse_coverage(reason: str) -> float | None:
     """Extract the coverage float from a reason string like 'coverage=95.0%'."""
     m = re.search(r'coverage=([0-9.]+)%', reason)
     return float(m.group(1)) / 100.0 if m else None
+
+
+def make_result_path(mode: str, run_id: str) -> Path:
+    """Build the per-run CSV path: results/<dd-mm-yyyy>-<mode>-<id>.csv"""
+    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    date_str = datetime.now().strftime('%d-%m-%Y')
+    return RESULTS_DIR / f'{date_str}-{mode}-{run_id}.csv'
 
 
 def append_result(
@@ -86,7 +130,6 @@ def append_result(
 ) -> None:
     """Append one episode result row to the CSV result file."""
     try:
-        result_file.parent.mkdir(parents=True, exist_ok=True)
         coverage = _parse_coverage(reason)
         write_header = not result_file.exists()
 
@@ -139,8 +182,6 @@ def wait_for_episode_done(
         if episode_file.exists():
             return episode_file.read_text().strip()
         if proc.poll() is not None:
-            # Process died – check file one final time in case it was written
-            # just before the process exited (e.g. episode_manager signal flow).
             time.sleep(0.2)
             if episode_file.exists():
                 return episode_file.read_text().strip()
@@ -170,9 +211,6 @@ def kill_launch(proc: subprocess.Popen) -> None:
     _kill_stale_ros_processes()
 
 
-# Processes that routinely survive SIGINT to the launch process group and keep
-# publishing topics (including the latched /map) into the next episode. We
-# match by command-line substring via pkill -f. Order doesn't matter.
 _STALE_PATTERNS = [
     'cartographer_node',
     'ros_gz_bridge',
@@ -216,11 +254,13 @@ def run(
     timeout: float,
     threshold: float,
     headless: bool,
+    world_file: Path,
     result_file: Path,
 ) -> None:
     print(f'[runner] Starting episodic training: mode={mode}, episodes={n_episodes}')
     print(f'         threshold={threshold:.0%}, timeout={timeout:.0f}s, headless={headless}')
-    print(f'         results → {result_file}')
+    print(f'         world    → {world_file}')
+    print(f'         results  → {result_file}')
     print(f'         filtered nodes: {LOG_FILTER}')
 
     stats: list[dict] = []
@@ -230,6 +270,10 @@ def run(
 
         EPISODE_FILE.unlink(missing_ok=True)
 
+        # Pass world file to launch via environment variable
+        env = os.environ.copy()
+        env['SLAM_WORLD_FILE'] = str(world_file)
+
         launch_cmd = build_launch_cmd(mode, EPISODE_FILE, threshold, timeout, headless)
         print(f'[runner] Launching: {" ".join(launch_cmd)}')
 
@@ -238,8 +282,9 @@ def run(
             launch_cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            start_new_session=True,  # isolates the launch group so SIGINT from
-        )                            # episode_manager doesn't reach this runner
+            start_new_session=True,
+            env=env,
+        )
         start_filtered_readers(proc)
 
         reason = wait_for_episode_done(EPISODE_FILE, proc)
@@ -282,9 +327,13 @@ def main() -> None:
                         help='Coverage threshold to end episode (default: 0.99)')
     parser.add_argument('--headless', action='store_true',
                         help='Skip Gazebo GUI client')
-    parser.add_argument('--result-file', type=Path, default=DEFAULT_RESULT_FILE,
-                        help=f'CSV file to append results to (default: {DEFAULT_RESULT_FILE})')
+    parser.add_argument('--world', type=str, default=None,
+                        help='Path to an existing .sdf world file (skip generation)')
     args = parser.parse_args()
+
+    run_id = uuid.uuid4().hex[:8]
+    world_file = prepare_world(args.world, run_id)
+    result_file = make_result_path(args.mode, run_id)
 
     try:
         run(
@@ -293,7 +342,8 @@ def main() -> None:
             timeout=args.timeout,
             threshold=args.threshold,
             headless=args.headless,
-            result_file=args.result_file,
+            world_file=world_file,
+            result_file=result_file,
         )
     except KeyboardInterrupt:
         print('\n[runner] Interrupted by user.')

@@ -2,7 +2,7 @@ import os
 
 from ament_index_python import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import IncludeLaunchDescription, TimerAction, AppendEnvironmentVariable, ExecuteProcess, SetEnvironmentVariable
+from launch.actions import IncludeLaunchDescription, TimerAction, AppendEnvironmentVariable, ExecuteProcess, SetEnvironmentVariable, DeclareLaunchArgument
 from launch.conditions import IfCondition, UnlessCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import PathJoinSubstitution, LaunchConfiguration, PythonExpression
@@ -19,13 +19,19 @@ def generate_launch_description():
     episode_file = LaunchConfiguration('episode_file', default='/tmp/slam_episode_done')
     coverage_threshold = LaunchConfiguration('coverage_threshold', default='0.99')
     max_episode_duration = LaunchConfiguration('max_episode_duration', default='600.0')
+    world_file_arg = LaunchConfiguration('world_file', default='')
 
-    world_file = os.path.join(
-        get_package_share_directory('tb3_slam'), 'worlds', 'random_world.sdf'
-    )
-    success, _expected_cells = generate_random_world(world_file)
-    if not success:
-        exit(-1)
+    # If no world_file provided, generate a random one
+    world_file_val = os.environ.get('SLAM_WORLD_FILE', '')
+    if world_file_val:
+        world_file = world_file_val
+    else:
+        world_file = os.path.join(
+            get_package_share_directory('tb3_slam'), 'worlds', 'random_world.sdf'
+        )
+        success, _expected_cells = generate_random_world(world_file)
+        if not success:
+            exit(-1)
 
     launch_file_dir = os.path.join(get_package_share_directory('turtlebot3_gazebo'), 'launch')
     ros_gz_sim = get_package_share_directory('ros_gz_sim')

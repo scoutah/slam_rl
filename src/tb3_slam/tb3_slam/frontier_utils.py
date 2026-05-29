@@ -284,11 +284,13 @@ def centroids_from_map_debug(
     groups = find_groups(frontiers)
 
     centroids: list[tuple[int, int]] = []
+    centroid_group_sizes: list[int] = []
     dropped_samples: list[dict] = []
     for group in groups:
         centroid = find_centroid(group, grid, robot_grid_pos=robot_grid_pos)
         if centroid is not None:
             centroids.append(centroid)
+            centroid_group_sizes.append(len(group))
         elif len(dropped_samples) < 3:
             n = len(group)
             cr = sum(r for r, _ in group) // n
@@ -325,6 +327,7 @@ def centroids_from_map_debug(
         'n_centroids': len(centroids),
         'n_dropped_groups': len(groups) - len(centroids),
         'group_sizes': [len(g) for g in groups],
+        'centroid_group_sizes': centroid_group_sizes,
         'dropped_group_sample': dropped_samples,
         'frontiers': frontiers,
     }

@@ -179,6 +179,17 @@ def generate_launch_description():
         ),
     )
 
+    # The RL agent needs PyTorch which lives in the project-local .venv.
+    # We inject the venv's site-packages into PYTHONPATH so the system Python
+    # (used by ros2 launch) can import torch without a global install.
+    # colcon sets COLCON_PREFIX_PATH to <workspace>/install; go one level up.
+    _ws_root = os.path.dirname(os.environ.get('COLCON_PREFIX_PATH', ''))
+    _venv_site = os.path.join(_ws_root, '.venv', 'lib', 'python3.12', 'site-packages')
+
+    inject_venv = AppendEnvironmentVariable('PYTHONPATH', _venv_site)
+
+    inject_venv = AppendEnvironmentVariable('PYTHONPATH', _venv_site)
+
     rl_agent = Node(
         package='tb3_reinforced_exploration',
         executable='reinforced_exploration',
@@ -204,6 +215,7 @@ def generate_launch_description():
         # Only WARN and above from external nodes will appear on the terminal.
         SetEnvironmentVariable('RCUTILS_LOGGING_SEVERITY_THRESHOLD', 'WARN'),
         set_env_vars_resources,
+        inject_venv,
         gzserver_cmd,
         gzclient_cmd,
         spawn_turtlebot_cmd,

@@ -4,6 +4,8 @@ log/
 
 worlds/
 results/
+rl_data/
 
+.venv/
 .vscode
 __pycache__/

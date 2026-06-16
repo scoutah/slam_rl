@@ -33,11 +33,17 @@ class EpisodeManager(Node):
         # (nearly complete) map on /map with TRANSIENT_LOCAL QoS, which would
         # make the new episode terminate instantly at ~99% coverage.
         self.declare_parameter('startup_grace_s', 15.0)
+        # Abort episode if coverage does not increase by at least
+        # stuck_min_delta within stuck_timeout_s seconds.
+        self.declare_parameter('stuck_timeout_s', 90.0)
+        self.declare_parameter('stuck_min_delta', 0.005)
 
         self.threshold: float = self.get_parameter('coverage_threshold').value
         self.episode_file: str = self.get_parameter('episode_file').value
         self.max_duration: float = self.get_parameter('max_episode_duration').value
         self.startup_grace_s: float = self.get_parameter('startup_grace_s').value
+        self._stuck_timeout: float = self.get_parameter('stuck_timeout_s').value
+        self._stuck_min_delta: float = self.get_parameter('stuck_min_delta').value
 
         expected = load_expected_cells()
         if expected is None:
@@ -52,6 +58,8 @@ class EpisodeManager(Node):
 
         self._start_time: float = time.time()
         self._done: bool = False
+        self._last_coverage: float = 0.0
+        self._last_coverage_change_time: float = time.time()
 
         self._coverage_pub = self.create_publisher(Float32, '/episode/coverage', 10)
 
@@ -63,6 +71,7 @@ class EpisodeManager(Node):
         self.get_logger().info(
             f'EpisodeManager started – threshold={self.threshold:.0%}, '
             f'max_duration={self.max_duration:.0f}s, '
+            f'stuck_timeout={self._stuck_timeout:.0f}s, '
             f'episode_file={self.episode_file}'
         )
 
@@ -91,6 +100,20 @@ class EpisodeManager(Node):
             f'Coverage: {coverage:.1%}  ({known}/{expected} cells)',
             throttle_duration_sec=5.0,
         )
+
+        # Stuck detection: abort if coverage stagnates
+        if coverage - self._last_coverage >= self._stuck_min_delta:
+            self._last_coverage = coverage
+            self._last_coverage_change_time = time.time()
+        else:
+            stall_duration = time.time() - self._last_coverage_change_time
+            if stall_duration >= self._stuck_timeout:
+                elapsed = time.time() - self._start_time
+                self._signal_done(
+                    reason=f'stuck (coverage={coverage:.1%})',
+                    elapsed=elapsed,
+                )
+                return
 
         if coverage >= self.threshold:
             elapsed = time.time() - self._start_time

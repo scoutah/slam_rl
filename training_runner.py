@@ -76,13 +76,14 @@ def start_filtered_readers(proc: subprocess.Popen) -> list[threading.Thread]:
 # World generation
 # ---------------------------------------------------------------------------
 
-def prepare_world(world_arg: str | None, run_id: str) -> Path:
+def prepare_world(world_arg: str | None, run_id: str, save: bool = False) -> Path:
     """
     Return the path to the .sdf world file to use for this run.
 
     If *world_arg* is given, use that file directly (no copy).
-    Otherwise generate a new random world via tb3_slam.utils and save it
-    to worlds/<run_id>.sdf.
+    Otherwise generate a new random world via tb3_slam.utils.
+    When *save* is True, persist to worlds/<run_id>.sdf; otherwise
+    write to /tmp/ (ephemeral).
     """
     if world_arg:
         p = Path(world_arg).resolve()
@@ -94,8 +95,11 @@ def prepare_world(world_arg: str | None, run_id: str) -> Path:
     # Import here so the script can still --help without a colcon workspace
     from tb3_slam.utils import generate_random_world
 
-    WORLDS_DIR.mkdir(parents=True, exist_ok=True)
-    world_path = WORLDS_DIR / f'{run_id}.sdf'
+    if save:
+        WORLDS_DIR.mkdir(parents=True, exist_ok=True)
+        world_path = WORLDS_DIR / f'{run_id}.sdf'
+    else:
+        world_path = Path(f'/tmp/slam_world_{run_id}.sdf')
     success, _ = generate_random_world(str(world_path))
     if not success:
         print('[runner] ERROR: world generation failed', file=sys.stderr)
@@ -127,6 +131,7 @@ def append_result(
     mode: str,
     reason: str,
     elapsed: float,
+    world_file: Path | None = None,
 ) -> None:
     """Append one episode result row to the CSV result file."""
     try:
@@ -134,9 +139,10 @@ def append_result(
         write_header = not result_file.exists()
 
         with result_file.open('a', newline='') as f:
-            writer = csv.writer(f)
+            writer = csv.writer(f, delimiter=';')
             if write_header:
-                writer.writerow(['timestamp', 'episode', 'mode', 'reason', 'elapsed_s', 'coverage'])
+                writer.writerow(['timestamp', 'episode', 'mode', 'reason',
+                                 'elapsed_s', 'coverage', 'world'])
             writer.writerow([
                 datetime.now().isoformat(timespec='seconds'),
                 episode,
@@ -144,6 +150,7 @@ def append_result(
                 reason,
                 f'{elapsed:.1f}',
                 f'{coverage:.4f}' if coverage is not None else '',
+                world_file.name if world_file is not None else '',
             ])
     except Exception as exc:
         print(f'[runner] ERROR writing result to {result_file}: {exc}', file=sys.stderr)
@@ -256,10 +263,12 @@ def run(
     headless: bool,
     world_file: Path,
     result_file: Path,
+    randomize_worlds: bool = False,
+    save_worlds: bool = False,
 ) -> None:
     print(f'[runner] Starting episodic training: mode={mode}, episodes={n_episodes}')
     print(f'         threshold={threshold:.0%}, timeout={timeout:.0f}s, headless={headless}')
-    print(f'         world    → {world_file}')
+    print(f'         world    → {world_file}' + (' (new each episode)' if randomize_worlds else ''))
     print(f'         results  → {result_file}')
     print(f'         filtered nodes: {LOG_FILTER}')
 
@@ -267,6 +276,20 @@ def run(
 
     for episode in range(1, n_episodes + 1):
         print(f'\n[runner] ═══ Episode {episode}/{n_episodes} ═══')
+
+        if randomize_worlds and episode > 1:
+            from tb3_slam.utils import generate_random_world
+            ep_id = uuid.uuid4().hex[:8]
+            if save_worlds:
+                WORLDS_DIR.mkdir(parents=True, exist_ok=True)
+                world_file = WORLDS_DIR / f'{ep_id}.sdf'
+            else:
+                world_file = Path(f'/tmp/slam_world_{ep_id}.sdf')
+            success, _ = generate_random_world(str(world_file))
+            if not success:
+                print('[runner] ERROR: world generation failed', file=sys.stderr)
+                continue
+            print(f'[runner] New world: {world_file}')
 
         EPISODE_FILE.unlink(missing_ok=True)
 
@@ -294,7 +317,7 @@ def run(
         stats.append({'episode': episode, 'reason': reason, 'elapsed': elapsed})
 
         kill_launch(proc)
-        append_result(result_file, episode, mode, reason, elapsed)
+        append_result(result_file, episode, mode, reason, elapsed, world_file)
         print(f'[runner] Result appended to {result_file}')
         print(f'[runner] Simulation stopped. Waiting {INTER_EPISODE_PAUSE}s …')
         time.sleep(INTER_EPISODE_PAUSE)
@@ -306,6 +329,8 @@ def run(
     print(f'  Avg time  : {avg_time:.1f}s')
     timeouts = sum(1 for s in stats if 'timeout' in s['reason'])
     print(f'  Timeouts  : {timeouts}/{len(stats)}')
+    stuck = sum(1 for s in stats if 'stuck' in s['reason'])
+    print(f'  Stuck     : {stuck}/{len(stats)}')
     coverages = [_parse_coverage(s['reason']) for s in stats if _parse_coverage(s['reason']) is not None]
     if coverages:
         print(f'  Avg coverage: {sum(coverages)/len(coverages):.1%}')
@@ -329,10 +354,14 @@ def main() -> None:
                         help='Skip Gazebo GUI client')
     parser.add_argument('--world', type=str, default=None,
                         help='Path to an existing .sdf world file (skip generation)')
+    parser.add_argument('--randomize-worlds', action='store_true',
+                        help='Generate a new random world for each episode')
+    parser.add_argument('--save-worlds', action='store_true',
+                        help='Persist generated worlds to worlds/ (default: /tmp/)')
     args = parser.parse_args()
 
     run_id = uuid.uuid4().hex[:8]
-    world_file = prepare_world(args.world, run_id)
+    world_file = prepare_world(args.world, run_id, save=args.save_worlds)
     result_file = make_result_path(args.mode, run_id)
 
     try:
@@ -344,6 +373,8 @@ def main() -> None:
             headless=args.headless,
             world_file=world_file,
             result_file=result_file,
+            randomize_worlds=args.randomize_worlds,
+            save_worlds=args.save_worlds,
         )
     except KeyboardInterrupt:
         print('\n[runner] Interrupted by user.')

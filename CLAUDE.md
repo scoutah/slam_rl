@@ -44,7 +44,8 @@ Three ament_python packages in `src/`:
 
 **Launch sequence** (`src/tb3_slam/launch/sim_slam.launch.py`, timer-based):
 world generated at launch-description time (unless env `SLAM_WORLD_FILE` is set) →
-gz server (+ GUI unless headless) → spawn robot at **(0.0, 0.0)** → 2 s robot_state_publisher
+gz server (+ GUI unless headless) → spawn robot near the south wall (edge entry,
+scales with world size; written to world metadata by the generator) → 2 s robot_state_publisher
 → 5 s Cartographer (`turtlebot3_cartographer`) → 6 s startup spin (4 s of TwistStamped on
 `/cmd_vel`) → 10 s Nav2 (`nav2_bringup/navigation_launch.py`, default params) →
 20 s exploration node. `episode_manager` and `cmd_vel_relay` start immediately.
@@ -101,11 +102,13 @@ failed goals; spins via `/cmd_vel` when idle 15 s.
 
 5 × 5 m box (`world_size`), 0.15 m walls, recursive BSP with 3–5 splits; each split wall
 gets one door of `MIN_PATH_WIDTH = 1.1 m`; min room span 1.5 m. Split walls may not enter
-a keep-out square of ±0.5 m **around the origin**. Also writes the metadata file.
+a keep-out square of ±0.5 m **around the spawn point** (near the south wall). Also writes
+the metadata file (traversable cells + spawn x/y).
 
-Coupled constants to change together: `world_size` / keep-out (utils.py), spawn
-`x_pose`/`y_pose` (launch file), `SPAWN_XY` (tools/check_world_connectivity.py),
-Cartographer/Nav2 map size assumptions.
+The spawn is derived from `world_size` by `spawn_pose()` in utils.py (centred in x, just
+inside the south wall) and written to the world metadata. The launch file and
+`check_world_connectivity.py` both read it from there, so it scales with the world and
+cannot drift. To move the spawn, change `spawn_pose` / `SPAWN_WALL_MARGIN` only.
 
 ## Known issues (state at start of WS 2026/27)
 

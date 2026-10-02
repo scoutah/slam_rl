@@ -15,6 +15,22 @@ MAP_RESOLUTION: float = 0.05  # metres per cell
 # rooms the robot can see but cannot enter.
 MIN_PATH_WIDTH: float = 1.1
 
+# Distance from the inner face of the south wall to the robot spawn. The robot
+# starts near the wall (edge), facing into the room, to mimic a real-world
+# "robot enters the room" scenario. Must leave enough clearance for the robot
+# footprint plus Nav2 inflation so the spawn is never inside an (inflated) wall.
+SPAWN_WALL_MARGIN: float = 0.7
+
+
+def spawn_pose(world_size: float, wall_thickness: float) -> Tuple[float, float]:
+    """Robot spawn (x, y): centred in x, just inside the south wall.
+
+    Derived from world_size so it stays at the edge when worlds grow larger.
+    """
+    half = world_size / 2.0
+    y = -half + wall_thickness / 2.0 + SPAWN_WALL_MARGIN
+    return (0.0, y)
+
 
 def generate_random_world(file_path: str) -> tuple[bool, int]:
     """
@@ -34,6 +50,9 @@ def generate_random_world(file_path: str) -> tuple[bool, int]:
         keep_out_half = 0.5
 
         half = world_size / 2.0
+
+        # Robot spawns near the south wall (edge entry), not the centre.
+        spawn_x, spawn_y = spawn_pose(world_size, wall_thickness)
 
         # Track footprint area of every wall to derive free-space estimate
         _wall_areas: List[float] = []
@@ -81,10 +100,10 @@ def generate_random_world(file_path: str) -> tuple[bool, int]:
             max_y = center_y + half_y
 
             return not (
-                max_x <= -keep_out_half
-                or min_x >= keep_out_half
-                or max_y <= -keep_out_half
-                or min_y >= keep_out_half
+                max_x <= spawn_x - keep_out_half
+                or min_x >= spawn_x + keep_out_half
+                or max_y <= spawn_y - keep_out_half
+                or min_y >= spawn_y + keep_out_half
             )
 
         # --------------------------------------------------
@@ -341,7 +360,11 @@ def generate_random_world(file_path: str) -> tuple[bool, int]:
             f.write(sdf_content)
 
         WORLD_META_FILE.write_text(
-            json.dumps({'expected_traversable_cells': expected_traversable_cells})
+            json.dumps({
+                'expected_traversable_cells': expected_traversable_cells,
+                'spawn_x': spawn_x,
+                'spawn_y': spawn_y,
+            })
         )
 
         return True, expected_traversable_cells

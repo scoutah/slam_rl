@@ -10,7 +10,7 @@ from launch.substitutions import PathJoinSubstitution, LaunchConfiguration, Pyth
 from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
 
-from tb3_slam.utils import generate_random_world
+from tb3_slam.utils import generate_random_world, WORLD_META_FILE, spawn_pose
 
 
 def generate_launch_description():
@@ -32,6 +32,17 @@ def generate_launch_description():
         success, _expected_cells = generate_random_world(world_file)
         if not success:
             exit(-1)
+
+    # The generator writes the robot spawn (edge of the room, scales with world
+    # size) into the world metadata. Fall back to the default world geometry if
+    # a pre-made world is used without fresh metadata.
+    try:
+        import json
+        meta = json.loads(WORLD_META_FILE.read_text())
+        spawn_x = float(meta['spawn_x'])
+        spawn_y = float(meta['spawn_y'])
+    except (OSError, ValueError, KeyError):
+        spawn_x, spawn_y = spawn_pose(5.0, 0.15)
 
     launch_file_dir = os.path.join(get_package_share_directory('turtlebot3_gazebo'), 'launch')
     ros_gz_sim = get_package_share_directory('ros_gz_sim')
@@ -70,8 +81,8 @@ def generate_launch_description():
             os.path.join(launch_file_dir, 'spawn_turtlebot3.launch.py')
         ),
         launch_arguments={
-            'x_pose': '0.0',
-            'y_pose': '0.0',
+            'x_pose': str(spawn_x),
+            'y_pose': str(spawn_y),
             'use_sim_time': use_sim_time,
         }.items(),
     )

@@ -217,8 +217,7 @@ def generate_random_world(file_path: str) -> tuple[bool, int]:
         # 3. Assemble SDF
         # --------------------------------------------------
 
-        sdf_content = f"""
-        <?xml version="1.0"?>
+        sdf_content = f"""<?xml version="1.0"?>
 <sdf version="1.8">
   <world name="default">
     <physics type="ode">

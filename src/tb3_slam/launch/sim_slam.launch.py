@@ -1,8 +1,9 @@
 import os
+import sys
 
 from ament_index_python import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import IncludeLaunchDescription, TimerAction, AppendEnvironmentVariable, ExecuteProcess, SetEnvironmentVariable, DeclareLaunchArgument
+from launch.actions import IncludeLaunchDescription, TimerAction, AppendEnvironmentVariable, ExecuteProcess, SetEnvironmentVariable
 from launch.conditions import IfCondition, UnlessCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import PathJoinSubstitution, LaunchConfiguration, PythonExpression
@@ -19,7 +20,6 @@ def generate_launch_description():
     episode_file = LaunchConfiguration('episode_file', default='/tmp/slam_episode_done')
     coverage_threshold = LaunchConfiguration('coverage_threshold', default='0.99')
     max_episode_duration = LaunchConfiguration('max_episode_duration', default='600.0')
-    world_file_arg = LaunchConfiguration('world_file', default='')
 
     # If no world_file provided, generate a random one
     world_file_val = os.environ.get('SLAM_WORLD_FILE', '')
@@ -184,9 +184,8 @@ def generate_launch_description():
     # (used by ros2 launch) can import torch without a global install.
     # colcon sets COLCON_PREFIX_PATH to <workspace>/install; go one level up.
     _ws_root = os.path.dirname(os.environ.get('COLCON_PREFIX_PATH', ''))
-    _venv_site = os.path.join(_ws_root, '.venv', 'lib', 'python3.12', 'site-packages')
-
-    inject_venv = AppendEnvironmentVariable('PYTHONPATH', _venv_site)
+    _py_ver = f'python{sys.version_info.major}.{sys.version_info.minor}'
+    _venv_site = os.path.join(_ws_root, '.venv', 'lib', _py_ver, 'site-packages')
 
     inject_venv = AppendEnvironmentVariable('PYTHONPATH', _venv_site)
 

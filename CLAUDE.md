@@ -11,7 +11,8 @@ University project, inherited from a previous team; README is in German.
   The simulation does **not** run on macOS – develop on the Mac, run on Linux.
 - `export TURTLEBOT3_MODEL=burger` is required.
 - RL agent needs PyTorch in a project-local `.venv` (the launch file injects
-  `.venv/lib/python3.12/site-packages` into `PYTHONPATH`).
+  `.venv/lib/python<major>.<minor>/site-packages` into `PYTHONPATH`, matching the
+  running interpreter).
 - Pure-Python parts (`tb3_slam/utils.py`, `tools/`) run anywhere with numpy, e.g.
   `uv run --no-project --with numpy python tools/check_world_connectivity.py`.
 - Gitignored runtime dirs: `worlds/`, `results/`, `rl_data/`, `build/`, `install/`, `log/`.
@@ -116,12 +117,6 @@ cannot drift. To move the spawn, change `spawn_pose` / `SPAWN_WALL_MARGIN` only.
 2. **Single-robot everything** (no namespaces, one Cartographer, one Nav2, one `/map`).
 3. `--world PATH` reuses a saved SDF but `/tmp/slam_world_meta.json` still describes the
    last *generated* world → wrong coverage denominator.
-4. `src/tb3_exploration/test/test_frontier_utils.py` is stale (imports
-   `tb3_exploration.frontier_utils`, `find_nearest_frontier` – neither exist).
-5. README drift: says threshold 95 % (code: 99 %), omits `--world/--randomize-worlds/--save-worlds`,
-   lists `frontier_utils.py` under `tb3_exploration`, links Gazebo "Jetty" (Jazzy pairs with Harmonic).
-6. Minor: launch file appends the venv path twice and hard-codes `python3.12`; unused
-   `world_file` launch arg; SDF output has whitespace before `<?xml`.
 
 ## Semester goals
 

@@ -64,8 +64,8 @@ independent variable besides method), one metric set.
 
 ## Prerequisites (known bugs from `CLAUDE.md`, to be fixed before evaluation)
 
-Hard-coded world size, stale `/tmp/slam_world_meta.json` when using `--world`, README drift,
-stale `tb3_exploration` tests. Tracked as GitHub issues.
+Hard-coded world size, stale `/tmp/slam_world_meta.json` when using `--world`.
+Tracked as GitHub issues.
 
 ## Work packages
 

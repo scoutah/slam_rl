@@ -71,7 +71,7 @@ scales with world size; written to world metadata by the generator) → 2 s robo
 (stale TRANSIENT_LOCAL map from a previous Cartographer).
 
 **Coverage** = known-free cells (value 0–25) / expected free cells from wall-area
-geometry, capped at 1.0. It does not know about unreachable rooms.
+geometry, capped at 1.0.
 
 ### Frontier pipeline (`tb3_slam/frontier_utils.py`, used by both explorers)
 
@@ -112,35 +112,21 @@ cannot drift. To move the spawn, change `spawn_pose` / `SPAWN_WALL_MARGIN` only.
 
 ## Known issues (state at start of WS 2026/27)
 
-1. **Unpassable passages.** `tools/check_world_connectivity.py`, 300 worlds, seed 0:
-
-   | clearance | worlds with an unreachable region | spawn inside wall/clearance |
-   |---|---|---|
-   | 0.22 m | 4 | 20 |
-   | 0.30 m | 41 | 29 |
-   | 0.40 m | 102 | 31 |
-
-   Causes: (a) a later split wall spans its whole sub-room, so it can end *inside the
-   door gap* of the parent wall and cut it into two narrow gaps; (b) the keep-out zone is
-   at (0, 0) but the robot used to spawn at (2.0, 0.0). Both fixed: door-gap-aware splits
-   plus spawning the robot at (0, 0), inside the keep-out zone.
-2. **World size** is hard-coded (5 m) and not parameterised; spawn point is independent.
-3. **Single-robot everything** (no namespaces, one Cartographer, one Nav2, one `/map`).
-4. `--world PATH` reuses a saved SDF but `/tmp/slam_world_meta.json` still describes the
+1. **World size** is hard-coded (5 m) and not parameterised; spawn point is independent.
+2. **Single-robot everything** (no namespaces, one Cartographer, one Nav2, one `/map`).
+3. `--world PATH` reuses a saved SDF but `/tmp/slam_world_meta.json` still describes the
    last *generated* world → wrong coverage denominator.
-5. `src/tb3_exploration/test/test_frontier_utils.py` is stale (imports
+4. `src/tb3_exploration/test/test_frontier_utils.py` is stale (imports
    `tb3_exploration.frontier_utils`, `find_nearest_frontier` – neither exist).
-6. README drift: says threshold 95 % (code: 99 %), omits `--world/--randomize-worlds/--save-worlds`,
+5. README drift: says threshold 95 % (code: 99 %), omits `--world/--randomize-worlds/--save-worlds`,
    lists `frontier_utils.py` under `tb3_exploration`, links Gazebo "Jetty" (Jazzy pairs with Harmonic).
-7. Minor: launch file appends the venv path twice and hard-codes `python3.12`; unused
+6. Minor: launch file appends the venv path twice and hard-codes `python3.12`; unused
    `world_file` launch arg; SDF output has whitespace before `<?xml`.
 
 ## Semester goals
 
-1. Fix the generator so every room is reachable (verify with the connectivity script;
-   aim for 0 disconnected worlds at ≥ 0.30 m clearance and 0 blocked spawns).
-2. Bigger worlds (parameterised size, room count scaled with area).
-3. Two-robot exploration. Expect to touch: namespaced spawning + robot_state_publisher,
+1. Bigger worlds (parameterised size, room count scaled with area).
+2. Two-robot exploration. Expect to touch: namespaced spawning + robot_state_publisher,
    per-robot Cartographer (or multi-robot SLAM) plus map merging, per-robot Nav2
    (namespaced action servers/costmaps), a frontier allocator that avoids both robots
    picking the same goal, `cmd_vel_relay`/startup spin per namespace, coverage on the

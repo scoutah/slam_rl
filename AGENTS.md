@@ -118,14 +118,35 @@ cannot drift. To move the spawn, change `spawn_pose` / `SPAWN_WALL_MARGIN` only.
 1. **World size** is hard-coded (5 m) and not parameterised; spawn point is independent.
 2. **Single-robot everything** (no namespaces, one Cartographer, one Nav2, one `/map`).
 
-## Semester goals
+## Studienbericht 2 – multi-robot exploration
 
-1. Bigger worlds (parameterised size, room count scaled with area).
-2. Two-robot exploration. Expect to touch: namespaced spawning + robot_state_publisher,
-   per-robot Cartographer (or multi-robot SLAM) plus map merging, per-robot Nav2
-   (namespaced action servers/costmaps), a frontier allocator that avoids both robots
-   picking the same goal, `cmd_vel_relay`/startup spin per namespace, coverage on the
-   merged map, and `training_runner`'s kill list.
+### Why
+
+On 5 × 5 m worlds with one robot, nearest-frontier is already near-optimal, so there is no
+room to tell whether RL beats a classical allocator. Larger, room-like worlds explored by
+two robots create coordination choices where a smarter allocator can matter. The graded
+deliverable is a paper of ~8000 words, so scope stays tight: anything that does not serve
+the research question is out of scope. The project is standalone – no single-robot baseline.
+
+### Research question
+
+> In two-robot exploration of large, room-like worlds, does an RL-based frontier allocator
+> outperform a good classical allocator?
+
+Two methods (classical vs RL), two robots, one or two map sizes (map size is the only
+independent variable besides method), one metric set.
+
+### The system
+
+Gazebo simulation of two namespaced TurtleBot3 Burgers in random room-like worlds larger
+than 5 × 5 m. Each robot runs its own Cartographer, Nav2 and `cmd_vel_relay`; the local maps
+are merged into one global map on which frontier detection, coverage and episode end run. A
+single allocator node sees the merged map and both robots' poses and assigns a frontier goal
+to each robot through a shared interface `(merged_map, poses) -> (goal_r1, goal_r2)`; the only
+difference between the two methods is the allocator behind that interface – a cost-utility
+classical allocator and a centralised pointwise-DQN allocator. Both methods run on identical
+worlds, frontier detection, Nav2 config, episode-end rules and metrics; evaluation compares
+time to coverage, stuck/timeout rate and distance travelled across many episodes.
 
 ## Conventions
 

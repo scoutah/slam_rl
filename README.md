@@ -20,7 +20,7 @@ TurtleBot3-basiertes SLAM-Projekt mit klassischer Frontier-Exploration und Reinf
 
 ### 2. Gazebo
 
-[Offizielle Anleitung](https://gazebosim.org/docs/jetty/install_ubuntu/)
+[Offizielle Anleitung](https://gazebosim.org/docs/harmonic/install_ubuntu/)
 
 ### 3. TurtleBot3 & Abhängigkeiten
 
@@ -105,7 +105,7 @@ Der `training_runner.py` startet automatisch mehrere Episoden nacheinander:
 
 1. Zufällige Welt generieren
 2. Simulation starten
-3. Roboter erkundet bis **95 % der Karte** kartiert sind (oder Timeout)
+3. Roboter erkundet bis **99 % der Karte** kartiert sind (oder Timeout)
 4. Simulation beenden → nächste Episode
 
 ```bash
@@ -126,8 +126,11 @@ python3 training_runner.py --help
 | `--mode` | `classic` | Exploration-Modus: `classic` oder `rl` |
 | `--episodes` | `10` | Anzahl Episoden |
 | `--timeout` | `600` | Max. Episodendauer in Sekunden |
-| `--threshold` | `0.95` | Coverage-Schwellwert für Episodenende |
+| `--threshold` | `0.99` | Coverage-Schwellwert für Episodenende |
 | `--headless` | `false` | Gazebo-GUI deaktivieren |
+| `--world` | – | Pfad zu einer bestehenden `.sdf`-Welt (überspringt die Generierung) |
+| `--randomize-worlds` | `false` | Pro Episode eine neue Zufallswelt generieren |
+| `--save-worlds` | `false` | Generierte Welten in `worlds/` ablegen (Standard: `/tmp/`) |
 
 ### Coverage überwachen (separates Terminal)
 
@@ -148,11 +151,12 @@ slam_rl/
 │   │   │   └── sim_slam.launch.py       # Haupt-Launch-File
 │   │   └── tb3_slam/
 │   │       ├── utils.py                 # Welten-Generierung (SDF)
+│   │       ├── frontier_utils.py        # Frontier-Erkennung & Gruppierung
+│   │       ├── frontier_viz.py          # Frontier-Visualisierung (RViz-Marker)
 │   │       └── episode_manager.py       # Coverage-Tracking & Episodensignal
 │   ├── tb3_exploration/
 │   │   └── tb3_exploration/
-│   │       ├── frontier_explorer.py     # Klassische Exploration
-│   │       └── frontier_utils.py        # Frontier-Erkennung & Gruppierung
+│   │       └── frontier_explorer.py     # Klassische Exploration
 │   └── tb3_reinforced_exploration/
 │       └── tb3_reinforced_exploration/
 │           └── rl_agent.py              # RL-Agent (Stub)

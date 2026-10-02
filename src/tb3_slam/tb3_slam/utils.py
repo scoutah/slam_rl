@@ -15,6 +15,22 @@ MAP_RESOLUTION: float = 0.05  # metres per cell
 # rooms the robot can see but cannot enter.
 MIN_PATH_WIDTH: float = 1.1
 
+# Distance from the inner face of the south wall to the robot spawn. The robot
+# starts near the wall (edge), facing into the room, to mimic a real-world
+# "robot enters the room" scenario. Must leave enough clearance for the robot
+# footprint plus Nav2 inflation so the spawn is never inside an (inflated) wall.
+SPAWN_WALL_MARGIN: float = 0.7
+
+
+def spawn_pose(world_size: float, wall_thickness: float) -> Tuple[float, float]:
+    """Robot spawn (x, y): centred in x, just inside the south wall.
+
+    Derived from world_size so it stays at the edge when worlds grow larger.
+    """
+    half = world_size / 2.0
+    y = -half + wall_thickness / 2.0 + SPAWN_WALL_MARGIN
+    return (0.0, y)
+
 
 def generate_random_world(file_path: str) -> tuple[bool, int]:
     """
@@ -34,6 +50,9 @@ def generate_random_world(file_path: str) -> tuple[bool, int]:
         keep_out_half = 0.5
 
         half = world_size / 2.0
+
+        # Robot spawns near the south wall (edge entry), not the centre.
+        spawn_x, spawn_y = spawn_pose(world_size, wall_thickness)
 
         # Track footprint area of every wall to derive free-space estimate
         _wall_areas: List[float] = []
@@ -81,10 +100,10 @@ def generate_random_world(file_path: str) -> tuple[bool, int]:
             max_y = center_y + half_y
 
             return not (
-                max_x <= -keep_out_half
-                or min_x >= keep_out_half
-                or max_y <= -keep_out_half
-                or min_y >= keep_out_half
+                max_x <= spawn_x - keep_out_half
+                or min_x >= spawn_x + keep_out_half
+                or max_y <= spawn_y - keep_out_half
+                or min_y >= spawn_y + keep_out_half
             )
 
         # --------------------------------------------------
@@ -111,6 +130,34 @@ def generate_random_world(file_path: str) -> tuple[bool, int]:
         # Any wall sub-segment shorter than this collapses into the door, so
         # the actual opening can only ever be ≥ door_width.
         min_segment = 0.25
+
+        # Door openings created by previous splits, stored as axis-aligned
+        # free rectangles (xmin, xmax, ymin, ymax). A later perpendicular split
+        # wall whose solid segment overlaps one of these openings would cut the
+        # door into a passage narrower than door_width, making a room
+        # unreachable. We reject such splits (see blocks_existing_door).
+        doors: List[Tuple[float, float, float, float]] = []
+
+        def blocks_existing_door(segments) -> bool:
+            """True if any wall segment overlaps an existing door opening.
+
+            segments are (center_x, center_y, size_x, size_y) boxes. A door is
+            the free rectangle left in a parent wall; if a new perpendicular
+            wall intrudes into that rectangle it narrows the opening below
+            door_width, so the split must be rejected.
+            """
+            for cx, cy, sx, sy in segments:
+                seg_xmin = cx - sx / 2.0
+                seg_xmax = cx + sx / 2.0
+                seg_ymin = cy - sy / 2.0
+                seg_ymax = cy + sy / 2.0
+                for dxmin, dxmax, dymin, dymax in doors:
+                    # Strict overlap of the segment box with the open door
+                    # rectangle (touching at an edge is allowed).
+                    if (seg_xmin < dxmax and seg_xmax > dxmin
+                            and seg_ymin < dymax and seg_ymax > dymin):
+                        return True
+            return False
 
         split_count = 0
         attempts = 0
@@ -169,8 +216,19 @@ def generate_random_world(file_path: str) -> tuple[bool, int]:
                     if any(intersects_keep_out(x, y, sx, sy) for x, y, sx, sy in segments):
                         continue
 
+                    if blocks_existing_door(segments):
+                        continue
+
                     for seg_idx, (x, y, sx, sy) in enumerate(segments):
                         walls.append(create_wall(f"split_{split_count}_v_{seg_idx}", x, y, sx, sy))
+
+                    # Record the door opening: free gap in y at x = split_x.
+                    doors.append((
+                        split_x - wall_thickness / 2.0,
+                        split_x + wall_thickness / 2.0,
+                        door_center - door_width / 2.0,
+                        door_center + door_width / 2.0,
+                    ))
 
                     rooms.append((xmin, split_x, ymin, ymax))
                     rooms.append((split_x, xmax, ymin, ymax))
@@ -199,8 +257,19 @@ def generate_random_world(file_path: str) -> tuple[bool, int]:
                     if any(intersects_keep_out(x, y, sx, sy) for x, y, sx, sy in segments):
                         continue
 
+                    if blocks_existing_door(segments):
+                        continue
+
                     for seg_idx, (x, y, sx, sy) in enumerate(segments):
                         walls.append(create_wall(f"split_{split_count}_h_{seg_idx}", x, y, sx, sy))
+
+                    # Record the door opening: free gap in x at y = split_y.
+                    doors.append((
+                        door_center - door_width / 2.0,
+                        door_center + door_width / 2.0,
+                        split_y - wall_thickness / 2.0,
+                        split_y + wall_thickness / 2.0,
+                    ))
 
                     rooms.append((xmin, xmax, ymin, split_y))
                     rooms.append((xmin, xmax, split_y, ymax))
@@ -291,7 +360,11 @@ def generate_random_world(file_path: str) -> tuple[bool, int]:
             f.write(sdf_content)
 
         WORLD_META_FILE.write_text(
-            json.dumps({'expected_traversable_cells': expected_traversable_cells})
+            json.dumps({
+                'expected_traversable_cells': expected_traversable_cells,
+                'spawn_x': spawn_x,
+                'spawn_y': spawn_y,
+            })
         )
 
         return True, expected_traversable_cells

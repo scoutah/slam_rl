@@ -24,7 +24,7 @@ independent variable besides method), one metric set.
 ## Target system
 
 - **Simulation:** Gazebo, 2 TurtleBot3 Burgers, random room-like worlds, larger than 5 × 5 m
-  (parameterised size, room count scaled with area), every room reachable.
+  (parameterised size, room count scaled with area).
 - **Per-robot stack:** namespaced spawn + robot_state_publisher, own Cartographer, own Nav2,
   own `cmd_vel_relay`/startup spin.
 - **Map merging:** local maps merged into one global map. Frontier detection, coverage and
@@ -64,15 +64,14 @@ independent variable besides method), one metric set.
 
 ## Prerequisites (known bugs from `CLAUDE.md`, to be fixed before evaluation)
 
-Unreachable rooms / blocked spawn in the generator, hard-coded world size, stale
-`/tmp/slam_world_meta.json` when using `--world`, README drift, stale
-`tb3_exploration` tests. Tracked as GitHub issues.
+Hard-coded world size, stale `/tmp/slam_world_meta.json` when using `--world`, README drift,
+stale `tb3_exploration` tests. Tracked as GitHub issues.
 
 ## Work packages
 
 All tracked as GitHub issues in `scoutah/slam_rl` (label `studienbericht-2`). Rough order:
 
-1. Generator fixes + parameterised/larger worlds (+ spawn points for 2 robots)
+1. Parameterised/larger worlds (+ spawn points for 2 robots)
 2. Multi-robot simulation stack (namespaces, SLAM, Nav2, relay)
 3. Map merging + coverage/episode manager on the merged map
 4. Allocator interface, classical cost-utility allocator

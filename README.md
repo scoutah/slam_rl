@@ -86,7 +86,7 @@ ros2 launch tb3_slam sim_slam.launch.py exploration_mode:=classic
 ros2 launch tb3_slam sim_slam.launch.py exploration_mode:=rl
 ```
 
-Der Exploration-Node startet automatisch mit ~12 s Verzögerung, damit Cartographer und Nav2 bereit sind.
+Der Exploration-Node startet automatisch mit ~20 s Verzögerung, damit Cartographer und Nav2 bereit sind.
 
 **Simulation immer mit `Ctrl+C` beenden.**
 

@@ -70,7 +70,7 @@ def generate_launch_description():
             os.path.join(launch_file_dir, 'spawn_turtlebot3.launch.py')
         ),
         launch_arguments={
-            'x_pose': '2.0',
+            'x_pose': '0.0',
             'y_pose': '0.0',
             'use_sim_time': use_sim_time,
         }.items(),

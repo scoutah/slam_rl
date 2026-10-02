@@ -112,6 +112,34 @@ def generate_random_world(file_path: str) -> tuple[bool, int]:
         # the actual opening can only ever be ≥ door_width.
         min_segment = 0.25
 
+        # Door openings created by previous splits, stored as axis-aligned
+        # free rectangles (xmin, xmax, ymin, ymax). A later perpendicular split
+        # wall whose solid segment overlaps one of these openings would cut the
+        # door into a passage narrower than door_width, making a room
+        # unreachable. We reject such splits (see blocks_existing_door).
+        doors: List[Tuple[float, float, float, float]] = []
+
+        def blocks_existing_door(segments) -> bool:
+            """True if any wall segment overlaps an existing door opening.
+
+            segments are (center_x, center_y, size_x, size_y) boxes. A door is
+            the free rectangle left in a parent wall; if a new perpendicular
+            wall intrudes into that rectangle it narrows the opening below
+            door_width, so the split must be rejected.
+            """
+            for cx, cy, sx, sy in segments:
+                seg_xmin = cx - sx / 2.0
+                seg_xmax = cx + sx / 2.0
+                seg_ymin = cy - sy / 2.0
+                seg_ymax = cy + sy / 2.0
+                for dxmin, dxmax, dymin, dymax in doors:
+                    # Strict overlap of the segment box with the open door
+                    # rectangle (touching at an edge is allowed).
+                    if (seg_xmin < dxmax and seg_xmax > dxmin
+                            and seg_ymin < dymax and seg_ymax > dymin):
+                        return True
+            return False
+
         split_count = 0
         attempts = 0
         max_attempts = 200
@@ -169,8 +197,19 @@ def generate_random_world(file_path: str) -> tuple[bool, int]:
                     if any(intersects_keep_out(x, y, sx, sy) for x, y, sx, sy in segments):
                         continue
 
+                    if blocks_existing_door(segments):
+                        continue
+
                     for seg_idx, (x, y, sx, sy) in enumerate(segments):
                         walls.append(create_wall(f"split_{split_count}_v_{seg_idx}", x, y, sx, sy))
+
+                    # Record the door opening: free gap in y at x = split_x.
+                    doors.append((
+                        split_x - wall_thickness / 2.0,
+                        split_x + wall_thickness / 2.0,
+                        door_center - door_width / 2.0,
+                        door_center + door_width / 2.0,
+                    ))
 
                     rooms.append((xmin, split_x, ymin, ymax))
                     rooms.append((split_x, xmax, ymin, ymax))
@@ -199,8 +238,19 @@ def generate_random_world(file_path: str) -> tuple[bool, int]:
                     if any(intersects_keep_out(x, y, sx, sy) for x, y, sx, sy in segments):
                         continue
 
+                    if blocks_existing_door(segments):
+                        continue
+
                     for seg_idx, (x, y, sx, sy) in enumerate(segments):
                         walls.append(create_wall(f"split_{split_count}_h_{seg_idx}", x, y, sx, sy))
+
+                    # Record the door opening: free gap in x at y = split_y.
+                    doors.append((
+                        door_center - door_width / 2.0,
+                        door_center + door_width / 2.0,
+                        split_y - wall_thickness / 2.0,
+                        split_y + wall_thickness / 2.0,
+                    ))
 
                     rooms.append((xmin, xmax, ymin, split_y))
                     rooms.append((xmin, xmax, split_y, ymax))

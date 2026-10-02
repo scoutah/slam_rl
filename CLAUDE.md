@@ -44,7 +44,7 @@ Three ament_python packages in `src/`:
 
 **Launch sequence** (`src/tb3_slam/launch/sim_slam.launch.py`, timer-based):
 world generated at launch-description time (unless env `SLAM_WORLD_FILE` is set) →
-gz server (+ GUI unless headless) → spawn robot at **(2.0, 0.0)** → 2 s robot_state_publisher
+gz server (+ GUI unless headless) → spawn robot at **(0.0, 0.0)** → 2 s robot_state_publisher
 → 5 s Cartographer (`turtlebot3_cartographer`) → 6 s startup spin (4 s of TwistStamped on
 `/cmd_vel`) → 10 s Nav2 (`nav2_bringup/navigation_launch.py`, default params) →
 20 s exploration node. `episode_manager` and `cmd_vel_relay` start immediately.
@@ -119,7 +119,8 @@ Cartographer/Nav2 map size assumptions.
 
    Causes: (a) a later split wall spans its whole sub-room, so it can end *inside the
    door gap* of the parent wall and cut it into two narrow gaps; (b) the keep-out zone is
-   at (0, 0) but the robot spawns at (2.0, 0.0).
+   at (0, 0) but the robot used to spawn at (2.0, 0.0). Both fixed: door-gap-aware splits
+   plus spawning the robot at (0, 0), inside the keep-out zone.
 2. **World size** is hard-coded (5 m) and not parameterised; spawn point is independent.
 3. **Single-robot everything** (no namespaces, one Cartographer, one Nav2, one `/map`).
 4. `--world PATH` reuses a saved SDF but `/tmp/slam_world_meta.json` still describes the

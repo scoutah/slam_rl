@@ -34,7 +34,7 @@ sys.path.insert(0, str(PROJECT_ROOT / 'src' / 'tb3_slam'))
 from tb3_slam import utils  # noqa: E402
 
 # Must match x_pose / y_pose in src/tb3_slam/launch/sim_slam.launch.py
-SPAWN_XY = (2.0, 0.0)
+SPAWN_XY = (0.0, 0.0)
 RASTER_RES = 0.02         # metres per raster cell
 MIN_REGION_AREA = 0.05    # m²; smaller free pockets (wall corners) are ignored
 

@@ -22,6 +22,29 @@ MIN_PATH_WIDTH: float = 1.1
 SPAWN_WALL_MARGIN: float = 0.7
 
 
+def world_meta_path(world_file: str) -> Path:
+    """Sidecar metadata path for a given world SDF.
+
+    Metadata is stored next to the world (``<world>.meta.json``) so a saved
+    world carries its own coverage denominator and spawn pose, instead of
+    relying on the shared /tmp file which only describes the *last generated*
+    world.
+    """
+    return Path(world_file).with_suffix('.meta.json')
+
+
+def write_world_meta(path: Path, expected_traversable_cells: int,
+                     spawn_x: float, spawn_y: float) -> None:
+    """Write world metadata (traversable cells + spawn pose) as JSON."""
+    path.write_text(
+        json.dumps({
+            'expected_traversable_cells': expected_traversable_cells,
+            'spawn_x': spawn_x,
+            'spawn_y': spawn_y,
+        })
+    )
+
+
 def spawn_pose(world_size: float, wall_thickness: float) -> Tuple[float, float]:
     """Robot spawn (x, y): centred in x, just inside the south wall.
 
@@ -36,7 +59,9 @@ def generate_random_world(file_path: str) -> tuple[bool, int]:
     """
     Generates a closed Gazebo SDF world (~5x5m) with room-like interior walls.
     Writes the world to file_path and writes expected traversable cell count
-    to WORLD_META_FILE so exploration nodes can use it as a coverage target.
+    (plus spawn pose) both to a sidecar next to the world (``<world>.meta.json``,
+    so a saved world can be reused via --world with the correct coverage
+    denominator) and to the shared WORLD_META_FILE that running nodes read.
 
     Returns:
         (success, expected_traversable_cells)
@@ -359,12 +384,15 @@ def generate_random_world(file_path: str) -> tuple[bool, int]:
         with open(file_path, 'w', encoding='utf-8') as f:
             f.write(sdf_content)
 
-        WORLD_META_FILE.write_text(
-            json.dumps({
-                'expected_traversable_cells': expected_traversable_cells,
-                'spawn_x': spawn_x,
-                'spawn_y': spawn_y,
-            })
+        # Write metadata both next to the world (sidecar, so a saved world
+        # carries its own coverage denominator for --world reuse) and to the
+        # shared /tmp file that running nodes read by default.
+        write_world_meta(
+            world_meta_path(file_path),
+            expected_traversable_cells, spawn_x, spawn_y,
+        )
+        write_world_meta(
+            WORLD_META_FILE, expected_traversable_cells, spawn_x, spawn_y,
         )
 
         return True, expected_traversable_cells

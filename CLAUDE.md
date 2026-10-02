@@ -59,8 +59,10 @@ scales with world size; written to world metadata by the generator) → 2 s robo
 - All topics/frames are **global, single-robot** (`/map`, `/cmd_vel`, `map`→`base_link`).
 
 **Inter-process files in `/tmp`**
-- `/tmp/slam_world_meta.json` – `expected_traversable_cells`, written by `generate_random_world`,
-  read by `coverage_monitor.load_expected_cells()`.
+- `/tmp/slam_world_meta.json` – `expected_traversable_cells` (+ spawn), written by
+  `generate_random_world`, read by `coverage_monitor.load_expected_cells()`. The generator
+  also writes a sidecar `<world>.meta.json` next to each SDF; the launch file copies that
+  sidecar into this file when a saved world is reused via `SLAM_WORLD_FILE`/`--world`.
 - `/tmp/slam_episode_done` – written by `episode_manager` (and by `frontier_explorer` on
   reaching threshold); content is the reason (`coverage=97.3%`, `stuck (coverage=…)`,
   `timeout`). `training_runner.py` polls it, then kills the whole launch process group
@@ -115,8 +117,6 @@ cannot drift. To move the spawn, change `spawn_pose` / `SPAWN_WALL_MARGIN` only.
 
 1. **World size** is hard-coded (5 m) and not parameterised; spawn point is independent.
 2. **Single-robot everything** (no namespaces, one Cartographer, one Nav2, one `/map`).
-3. `--world PATH` reuses a saved SDF but `/tmp/slam_world_meta.json` still describes the
-   last *generated* world → wrong coverage denominator.
 
 ## Semester goals
 

@@ -10,7 +10,12 @@ from launch.substitutions import PathJoinSubstitution, LaunchConfiguration, Pyth
 from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
 
-from tb3_slam.utils import generate_random_world, WORLD_META_FILE, spawn_pose
+from tb3_slam.utils import (
+    generate_random_world,
+    WORLD_META_FILE,
+    spawn_pose,
+    world_meta_path,
+)
 
 
 def generate_launch_description():
@@ -25,6 +30,20 @@ def generate_launch_description():
     world_file_val = os.environ.get('SLAM_WORLD_FILE', '')
     if world_file_val:
         world_file = world_file_val
+        # Reusing a saved world: its metadata (coverage denominator + spawn)
+        # lives in a sidecar next to the SDF, not in the shared /tmp file which
+        # still describes the last *generated* world. Copy the sidecar into
+        # WORLD_META_FILE so coverage_monitor and the spawn logic below read the
+        # values for the world actually loaded.
+        sidecar = world_meta_path(world_file)
+        if sidecar.exists():
+            WORLD_META_FILE.write_text(sidecar.read_text())
+        else:
+            print(
+                f'[launch] WARNING: no metadata sidecar for {world_file} '
+                f'({sidecar}); coverage denominator may be wrong.',
+                file=sys.stderr,
+            )
     else:
         world_file = os.path.join(
             get_package_share_directory('tb3_slam'), 'worlds', 'random_world.sdf'

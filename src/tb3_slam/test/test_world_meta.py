@@ -48,16 +48,23 @@ def test_generate_world_of_given_size(tmp_path, monkeypatch):
     monkeypatch.setattr(utils, 'WORLD_META_FILE', tmp_path / 'shared_meta.json')
 
     small, large = tmp_path / 'small.sdf', tmp_path / 'large.sdf'
-    ok_small, cells_small = utils.generate_random_world(str(small), 5.0)
-    ok_large, cells_large = utils.generate_random_world(str(large), 10.0)
+    ok_small, cells_small = utils.generate_random_world(str(small), 8.0)
+    ok_large, cells_large = utils.generate_random_world(str(large), 12.0)
     assert ok_small and ok_large
-    assert cells_large > 3 * cells_small
+    assert cells_large > 2 * cells_small
 
     data = json.loads(world_meta_path(str(large)).read_text())
-    assert data['world_size'] == 10.0
+    assert data['world_size'] == 12.0
     # Spawn stays just inside the south wall of the larger world.
-    assert (data['spawn_x'], data['spawn_y']) == utils.spawn_pose(10.0, utils.WALL_THICKNESS)
-    assert data['spawn_y'] < -4.0
+    assert (data['spawn_x'], data['spawn_y']) == utils.spawn_pose(12.0, utils.WALL_THICKNESS)
+    assert data['spawn_y'] < -5.0
+
+
+@pytest.mark.parametrize('world_size', [5.0, 10.0, 0.0])
+def test_only_study_world_sizes_are_valid(tmp_path, world_size):
+    with pytest.raises(ValueError):
+        utils.generate_random_world(str(tmp_path / 'w.sdf'), world_size)
+    assert not (tmp_path / 'w.sdf').exists()
 
 
 def _split_walls(sdf: Path) -> list[tuple[float, float]]:

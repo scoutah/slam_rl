@@ -116,9 +116,9 @@ def main() -> None:
     parser.add_argument('--clearance', type=float, nargs='+', default=[0.22, 0.30, 0.40],
                         help='Robot clearance radii in metres (default: 0.22 0.30 0.40)')
     parser.add_argument('--world-size', type=float, nargs='+',
-                        default=[utils.DEFAULT_WORLD_SIZE],
+                        choices=utils.WORLD_SIZES, default=list(utils.WORLD_SIZES),
                         help='World edge lengths in metres to generate '
-                             f'(default: {utils.DEFAULT_WORLD_SIZE})')
+                             '(default: all valid sizes)')
     parser.add_argument('--world', type=Path, nargs='+',
                         help='Check existing .sdf files instead of generating worlds')
     args = parser.parse_args()

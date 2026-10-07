@@ -13,7 +13,7 @@ Usage:
 Examples:
     python3 training_runner.py --mode classic --episodes 20
     python3 training_runner.py --mode rl --episodes 100 --headless
-    python3 training_runner.py --world-size 10 --randomize-worlds --episodes 20
+    python3 training_runner.py --world-size 12 --randomize-worlds --episodes 20
     python3 training_runner.py --world worlds/abc123.sdf --episodes 5
 """
 
@@ -376,8 +376,8 @@ def main() -> None:
     parser.add_argument('--world', type=str, default=None,
                         help='Path to an existing .sdf world file (skip generation)')
     parser.add_argument('--world-size', type=float, default=None,
-                        help='Edge length in metres of generated square worlds '
-                             '(default: generator default, see tb3_slam.utils)')
+                        help='Edge length in metres of generated square worlds; '
+                             'one of tb3_slam.utils.WORLD_SIZES (8, 12; default 8)')
     parser.add_argument('--randomize-worlds', action='store_true',
                         help='Generate a new random world for each episode')
     parser.add_argument('--save-worlds', action='store_true',
@@ -385,6 +385,13 @@ def main() -> None:
     args = parser.parse_args()
     if args.world and args.world_size is not None and not args.randomize_worlds:
         parser.error('--world-size has no effect with --world (size is baked into the SDF)')
+    if args.world_size is not None:
+        # Import here so --help still works without a colcon workspace.
+        from tb3_slam.utils import check_world_size
+        try:
+            check_world_size(args.world_size)
+        except ValueError as exc:
+            parser.error(str(exc))
 
     run_id = uuid.uuid4().hex[:8]
     world_file = prepare_world(args.world, run_id, save=args.save_worlds,

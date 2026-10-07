@@ -31,8 +31,8 @@ WALL_THICKNESS: float = 0.15
 # House-like room geometry for the BSP generator. Rooms are split until they
 # are at most MAX_ROOM_AREA (bedroom .. living room); a cut never leaves a room
 # smaller than MIN_ROOM_AREA or narrower than MIN_ROOM_SPAN.
-MIN_ROOM_AREA: float = 9.0    # m²
-MAX_ROOM_AREA: float = 20.0   # m²
+MIN_ROOM_AREA: float = 5.0    # m²
+MAX_ROOM_AREA: float = 9.0   # m²
 MIN_ROOM_SPAN: float = 2.0    # m
 MAX_ROOM_ASPECT: float = 2.5  # long side / short side
 # Cut position as a fraction of the room's long side (near-balanced cuts).

@@ -14,11 +14,13 @@ Usage:
     python3 tools/check_world_connectivity.py                 # 300 worlds
     python3 tools/check_world_connectivity.py -n 1000 --seed 1
     python3 tools/check_world_connectivity.py --clearance 0.22 0.3 0.4
+    python3 tools/check_world_connectivity.py --world-size 8 12
     python3 tools/check_world_connectivity.py --world worlds/abc123.sdf
 
 Only needs numpy (e.g. `uv run --no-project --with numpy python ...`).
 """
 import argparse
+import json
 import random
 import sys
 import tempfile
@@ -33,11 +35,6 @@ sys.path.insert(0, str(PROJECT_ROOT / 'src' / 'tb3_slam'))
 
 from tb3_slam import utils  # noqa: E402
 
-# Robot spawn: derived from the generator so it can never drift from the launch
-# file (which also reads it from the generator via world metadata). Uses the
-# default 5 m world geometry; worlds generated at other sizes write their own
-# spawn into the metadata.
-SPAWN_XY = utils.spawn_pose(5.0, 0.15)
 RASTER_RES = 0.02         # metres per raster cell
 MIN_REGION_AREA = 0.05    # m²; smaller free pockets (wall corners) are ignored
 
@@ -58,7 +55,22 @@ def load_walls(sdf_path: Path) -> list[tuple[float, float, float, float]]:
     return walls
 
 
-def analyze(walls, clearance: float) -> tuple[bool, int]:
+def load_spawn(sdf_path: Path) -> tuple[float, float]:
+    """Robot spawn (x, y) from the world's metadata sidecar.
+
+    The generator writes the spawn next to every world, so it matches what the
+    launch file uses for that world. Worlds without a sidecar fall back to the
+    default world geometry.
+    """
+    try:
+        meta = json.loads(utils.world_meta_path(str(sdf_path)).read_text())
+        return float(meta['spawn_x']), float(meta['spawn_y'])
+    except (OSError, ValueError, KeyError):
+        return utils.spawn_pose(utils.DEFAULT_WORLD_SIZE, utils.WALL_THICKNESS)
+
+
+def analyze(walls, clearance: float,
+            spawn_xy: tuple[float, float]) -> tuple[bool, int]:
     """Return (spawn_blocked, number_of_free_regions) for one world."""
     extent = max(max(abs(x) + sx / 2, abs(y) + sy / 2) for x, y, sx, sy in walls) + 0.1
 
@@ -73,8 +85,8 @@ def analyze(walls, clearance: float) -> tuple[bool, int]:
         outer = max(outer, abs(x) - sx / 2, abs(y) - sy / 2)
     free = ~blocked & (np.abs(X) < outer) & (np.abs(Y) < outer)
 
-    sr = int((SPAWN_XY[1] + extent) / RASTER_RES)
-    sc = int((SPAWN_XY[0] + extent) / RASTER_RES)
+    sr = int((spawn_xy[1] + extent) / RASTER_RES)
+    sc = int((spawn_xy[0] + extent) / RASTER_RES)
     spawn_blocked = not free[sr, sc]
 
     seen = np.zeros_like(free)
@@ -103,45 +115,55 @@ def main() -> None:
     parser.add_argument('--seed', type=int, default=0)
     parser.add_argument('--clearance', type=float, nargs='+', default=[0.22, 0.30, 0.40],
                         help='Robot clearance radii in metres (default: 0.22 0.30 0.40)')
+    parser.add_argument('--world-size', type=float, nargs='+',
+                        default=[utils.DEFAULT_WORLD_SIZE],
+                        help='World edge lengths in metres to generate '
+                             f'(default: {utils.DEFAULT_WORLD_SIZE})')
     parser.add_argument('--world', type=Path, nargs='+',
                         help='Check existing .sdf files instead of generating worlds')
     args = parser.parse_args()
 
     with tempfile.TemporaryDirectory() as tmp:
         if args.world:
-            paths = args.world
-        else:
-            # Keep generate_random_world from overwriting the metadata file a
-            # running simulation may be reading.
-            utils.WORLD_META_FILE = Path(tmp) / 'meta.json'
+            report(args.world, args.clearance, list_failures=True)
+            return
+        # Keep generate_random_world from overwriting the metadata file a
+        # running simulation may be reading.
+        utils.WORLD_META_FILE = Path(tmp) / 'meta.json'
+        for world_size in args.world_size:
             random.seed(args.seed)
             paths = []
             for i in range(args.num_worlds):
-                p = Path(tmp) / f'world_{i}.sdf'
-                ok, _ = utils.generate_random_world(str(p))
+                p = Path(tmp) / f'world_{world_size:g}_{i}.sdf'
+                ok, _ = utils.generate_random_world(str(p), world_size)
                 if not ok:
                     print(f'generation failed for world {i}', file=sys.stderr)
                     continue
                 paths.append(p)
+            print(f'world size {world_size:g} x {world_size:g} m:')
+            report(paths, args.clearance, list_failures=False)
 
-        walls_per_world = [load_walls(p) for p in paths]
-        total = len(paths)
-        for clearance in args.clearance:
-            disconnected, spawn_blocked = [], []
-            for path, walls in zip(paths, walls_per_world):
-                sb, regions = analyze(walls, clearance)
-                if regions > 1:
-                    disconnected.append(path.name)
-                if sb:
-                    spawn_blocked.append(path.name)
-            print(f'clearance {clearance:.2f} m: '
-                  f'disconnected {len(disconnected)}/{total}, '
-                  f'spawn blocked {len(spawn_blocked)}/{total}')
-            if args.world:
-                for name in disconnected:
-                    print(f'  disconnected: {name}')
-                for name in spawn_blocked:
-                    print(f'  spawn blocked: {name}')
+
+def report(paths: list[Path], clearances: list[float], list_failures: bool) -> None:
+    """Print disconnected / spawn-blocked counts per clearance radius."""
+    worlds = [(p, load_walls(p), load_spawn(p)) for p in paths]
+    total = len(worlds)
+    for clearance in clearances:
+        disconnected, spawn_blocked = [], []
+        for path, walls, spawn_xy in worlds:
+            sb, regions = analyze(walls, clearance, spawn_xy)
+            if regions > 1:
+                disconnected.append(path.name)
+            if sb:
+                spawn_blocked.append(path.name)
+        print(f'  clearance {clearance:.2f} m: '
+              f'disconnected {len(disconnected)}/{total}, '
+              f'spawn blocked {len(spawn_blocked)}/{total}')
+        if list_failures:
+            for name in disconnected:
+                print(f'    disconnected: {name}')
+            for name in spawn_blocked:
+                print(f'    spawn blocked: {name}')
 
 
 if __name__ == '__main__':

@@ -13,6 +13,7 @@ from launch_ros.substitutions import FindPackageShare
 from tb3_slam.utils import (
     DEFAULT_WORLD_SIZE,
     WALL_THICKNESS,
+    check_world_size,
     generate_random_world,
     WORLD_META_FILE,
     spawn_pose,
@@ -82,7 +83,7 @@ def generate_launch_description():
 
     def launch_world(context):
         world_file, spawn_x, spawn_y = prepare_world(
-            float(world_size.perform(context))
+            check_world_size(float(world_size.perform(context)))
         )
         gzserver_cmd = IncludeLaunchDescription(
             PythonLaunchDescriptionSource(

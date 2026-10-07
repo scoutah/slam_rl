@@ -26,12 +26,12 @@ python3 training_runner.py --mode classic --episodes 20 --headless --randomize-w
 python3 training_runner.py --world worlds/<id>.sdf --episodes 5     # reuse a saved world
 colcon test --packages-select tb3_slam && colcon test-result --verbose
 pkill -9 -f gz                                        # when Gazebo survives Ctrl+C
-python3 tools/check_world_connectivity.py --world-size 8 12   # offline generator check (no ROS)
+python3 tools/check_world_connectivity.py           # offline generator check, both sizes (no ROS)
 ```
 
 `training_runner.py` options: `--mode classic|rl`, `--episodes`, `--timeout` (600 s),
-`--threshold` (0.99), `--headless`, `--world PATH`, `--world-size METRES` (edge length of
-generated worlds; not allowed with `--world` alone), `--randomize-worlds` (otherwise ONE world
+`--threshold` (0.99), `--headless`, `--world PATH`, `--world-size 8|12` (edge length of
+generated worlds, default 8; not allowed with `--world` alone), `--randomize-worlds` (otherwise ONE world
 is reused for all episodes), `--save-worlds` (persist to `worlds/`). The results CSV has a
 `world_size` column (read from the world's metadata sidecar).
 
@@ -106,8 +106,11 @@ failed goals; spins via `/cmd_vel` when idle 15 s.
 
 ## World generator (`tb3_slam/utils.py::generate_random_world`)
 
-Square box of edge length `world_size` (default `DEFAULT_WORLD_SIZE` = 5 m), 0.15 m walls,
-house-like recursive BSP. Sizes are always edge lengths: "12 m" means 12 × 12 m = 144 m².
+Square box of edge length `world_size`, 0.15 m walls, house-like recursive BSP. Sizes are
+always edge lengths: "12 m" means 12 × 12 m = 144 m². **Only the study sizes in
+`WORLD_SIZES` (8, 12) are valid** – the generator raises `ValueError` otherwise, and the
+launch file, `training_runner.py` and `check_world_connectivity.py` reject other values.
+Default (`DEFAULT_WORLD_SIZE`) is 8.
 
 - **Stop criterion, not a split count:** a room is split while it is > `MAX_ROOM_AREA`
   (20 m²) or more elongated than `MAX_ROOM_ASPECT` (2.5); no cut leaves a room

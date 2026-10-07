@@ -21,9 +21,11 @@ MIN_PATH_WIDTH: float = 1.1
 # footprint plus Nav2 inflation so the spawn is never inside an (inflated) wall.
 SPAWN_WALL_MARGIN: float = 0.7
 
-# Edge length of the square world in metres. Overridable per world via the
-# world_size argument (launch arg / training_runner --world-size).
-DEFAULT_WORLD_SIZE: float = 5.0
+# Edge length of the square world in metres. Only the two study sizes are
+# valid (8 x 8 m and 12 x 12 m), selected per world via the world_size
+# argument (launch arg / training_runner --world-size).
+WORLD_SIZES: Tuple[float, ...] = (8.0, 12.0)
+DEFAULT_WORLD_SIZE: float = WORLD_SIZES[0]
 WALL_THICKNESS: float = 0.15
 
 # House-like room geometry for the BSP generator. Rooms are split until they
@@ -76,6 +78,14 @@ def spawn_pose(world_size: float, wall_thickness: float) -> Tuple[float, float]:
     return (0.0, y)
 
 
+def check_world_size(world_size: float) -> float:
+    """Return world_size if it is one of WORLD_SIZES, else raise ValueError."""
+    if world_size not in WORLD_SIZES:
+        valid = ', '.join(f'{s:g}' for s in WORLD_SIZES)
+        raise ValueError(f'world_size must be one of {valid} (got {world_size:g})')
+    return world_size
+
+
 def generate_random_world(
     file_path: str, world_size: float = DEFAULT_WORLD_SIZE,
 ) -> tuple[bool, int]:
@@ -90,7 +100,11 @@ def generate_random_world(
     Returns:
         (success, expected_traversable_cells)
         expected_traversable_cells is 0 on failure.
+
+    Raises:
+        ValueError: world_size is not one of WORLD_SIZES.
     """
+    check_world_size(world_size)
 
     try:
         wall_height = 1.2

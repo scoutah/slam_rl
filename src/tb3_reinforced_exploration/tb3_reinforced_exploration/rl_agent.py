@@ -15,6 +15,7 @@ accumulates across episodes launched by training_runner.py.
 """
 import collections
 import math
+import os
 from pathlib import Path
 import pickle
 import random
@@ -72,9 +73,38 @@ EPSILON_DECAY = 0.98
 TARGET_UPDATE_INTERVAL = 50
 MIN_REPLAY_SIZE = 50
 
-PERSIST_DIR = (
-    Path.home() / 'projects' / 'slam_rl' / 'rl_data'
-)
+
+def _resolve_persist_dir() -> Path:
+    """Locate the directory for the persisted model / replay buffer.
+
+    Resolution order (first match wins):
+
+    1. ``SLAM_RL_DATA_DIR`` environment variable (explicit override, used by
+       containerised / cloud runs where the workspace path is not known).
+    2. ``<workspace>/rl_data`` where the workspace root is derived from
+       ``COLCON_PREFIX_PATH`` (``<workspace>/install``) – the same convention
+       the launch file uses to locate the project-local ``.venv``. This keeps
+       ``rl_data`` next to the ``results/`` and ``worlds/`` dirs that
+       ``training_runner.py`` writes.
+    3. ``./rl_data`` relative to the current working directory as a last
+       resort, so the node never falls back to an absolute path baked into
+       the source.
+    """
+    env_dir = os.environ.get('SLAM_RL_DATA_DIR')
+    if env_dir:
+        return Path(env_dir).expanduser()
+
+    prefix_path = os.environ.get('COLCON_PREFIX_PATH', '')
+    if prefix_path:
+        # COLCON_PREFIX_PATH may list several prefixes; the first is this ws.
+        first_prefix = prefix_path.split(os.pathsep)[0]
+        ws_root = Path(first_prefix).parent
+        return ws_root / 'rl_data'
+
+    return Path.cwd() / 'rl_data'
+
+
+PERSIST_DIR = _resolve_persist_dir()
 MODEL_PATH = PERSIST_DIR / 'model.pt'
 REPLAY_PATH = PERSIST_DIR / 'replay.pkl'
 META_PATH = PERSIST_DIR / 'meta.pkl'

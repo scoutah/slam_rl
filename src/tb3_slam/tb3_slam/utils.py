@@ -21,6 +21,26 @@ MIN_PATH_WIDTH: float = 1.1
 # footprint plus Nav2 inflation so the spawn is never inside an (inflated) wall.
 SPAWN_WALL_MARGIN: float = 0.7
 
+# Edge length of the square world in metres. Overridable per world via the
+# world_size argument (launch arg / training_runner --world-size).
+DEFAULT_WORLD_SIZE: float = 5.0
+WALL_THICKNESS: float = 0.15
+
+# House-like room geometry for the BSP generator. Rooms are split until they
+# are at most MAX_ROOM_AREA (bedroom .. living room); a cut never leaves a room
+# smaller than MIN_ROOM_AREA or narrower than MIN_ROOM_SPAN.
+MIN_ROOM_AREA: float = 9.0    # m²
+MAX_ROOM_AREA: float = 20.0   # m²
+MIN_ROOM_SPAN: float = 2.0    # m
+MAX_ROOM_ASPECT: float = 2.5  # long side / short side
+# Cut position as a fraction of the room's long side (near-balanced cuts).
+SPLIT_FRACTION: Tuple[float, float] = (0.35, 0.65)
+# Minimum wall piece next to a door: a door is either flush with a corner or
+# has at least this much wall on each side, and later walls keep this distance
+# from existing doors. Avoids short wall stubs, which look unrealistic and are
+# Nav2 trouble spots.
+MIN_DOOR_SIDE_WALL: float = 0.8
+
 
 def world_meta_path(world_file: str) -> Path:
     """Sidecar metadata path for a given world SDF.
@@ -34,13 +54,14 @@ def world_meta_path(world_file: str) -> Path:
 
 
 def write_world_meta(path: Path, expected_traversable_cells: int,
-                     spawn_x: float, spawn_y: float) -> None:
-    """Write world metadata (traversable cells + spawn pose) as JSON."""
+                     spawn_x: float, spawn_y: float, world_size: float) -> None:
+    """Write world metadata (traversable cells, spawn pose, size) as JSON."""
     path.write_text(
         json.dumps({
             'expected_traversable_cells': expected_traversable_cells,
             'spawn_x': spawn_x,
             'spawn_y': spawn_y,
+            'world_size': world_size,
         })
     )
 
@@ -55,9 +76,12 @@ def spawn_pose(world_size: float, wall_thickness: float) -> Tuple[float, float]:
     return (0.0, y)
 
 
-def generate_random_world(file_path: str) -> tuple[bool, int]:
+def generate_random_world(
+    file_path: str, world_size: float = DEFAULT_WORLD_SIZE,
+) -> tuple[bool, int]:
     """
-    Generates a closed Gazebo SDF world (~5x5m) with room-like interior walls.
+    Generates a closed square Gazebo SDF world (world_size x world_size m)
+    with house-like interior rooms; the number of rooms follows the area.
     Writes the world to file_path and writes expected traversable cell count
     (plus spawn pose) both to a sidecar next to the world (``<world>.meta.json``,
     so a saved world can be reused via --world with the correct coverage
@@ -69,9 +93,9 @@ def generate_random_world(file_path: str) -> tuple[bool, int]:
     """
 
     try:
-        world_size = 5.0
         wall_height = 1.2
-        wall_thickness = 0.15
+        wall_thickness = WALL_THICKNESS
+        # Robot-scale clearance around the spawn, independent of world size.
         keep_out_half = 0.5
 
         half = world_size / 2.0
@@ -143,33 +167,28 @@ def generate_random_world(file_path: str) -> tuple[bool, int]:
         # --------------------------------------------------
         # 2. Interior room-like structure (connected BSP split)
         # --------------------------------------------------
-
-        rooms: List[Tuple[float, float, float, float]] = [(-half, half, -half, half)]
-
-        target_splits = random.randint(3, 5)
-        # Rooms must be wide enough to (a) fit a door of MIN_PATH_WIDTH and
-        # (b) still leave clearance on either side of the door. Buffer of
-        # 0.4 m keeps approach corridors comfortably wider than the door.
-        min_room_span = max(1.4, MIN_PATH_WIDTH + 0.4)
+        # Rooms are split recursively until they are house-sized: a room is
+        # split while it is larger than MAX_ROOM_AREA or more elongated than
+        # MAX_ROOM_ASPECT (stop criterion instead of a fixed split count, so
+        # the room count follows the world area). Each cut runs across the
+        # room's long axis near its middle (kd-tree style), which avoids
+        # slivers and corridor-like strips. Every split wall gets one door, so
+        # all rooms stay connected. Room bounds are wall centre lines.
         door_width = MIN_PATH_WIDTH
-        # Any wall sub-segment shorter than this collapses into the door, so
-        # the actual opening can only ever be ≥ door_width.
-        min_segment = 0.25
 
         # Door openings created by previous splits, stored as axis-aligned
-        # free rectangles (xmin, xmax, ymin, ymax). A later perpendicular split
-        # wall whose solid segment overlaps one of these openings would cut the
-        # door into a passage narrower than door_width, making a room
-        # unreachable. We reject such splits (see blocks_existing_door).
+        # free rectangles (xmin, xmax, ymin, ymax), widened by
+        # MIN_DOOR_SIDE_WALL along the opening. A later perpendicular split
+        # wall overlapping the opening itself would narrow the door below
+        # door_width (room unreachable); one landing just beside it would leave
+        # a short wall stub. Both are rejected (see blocks_existing_door).
         doors: List[Tuple[float, float, float, float]] = []
 
         def blocks_existing_door(segments) -> bool:
-            """True if any wall segment overlaps an existing door opening.
+            """True if any wall segment overlaps or crowds an existing door.
 
-            segments are (center_x, center_y, size_x, size_y) boxes. A door is
-            the free rectangle left in a parent wall; if a new perpendicular
-            wall intrudes into that rectangle it narrows the opening below
-            door_width, so the split must be rejected.
+            segments are (center_x, center_y, size_x, size_y) boxes, doors the
+            widened opening rectangles described above.
             """
             for cx, cy, sx, sy in segments:
                 seg_xmin = cx - sx / 2.0
@@ -184,127 +203,89 @@ def generate_random_world(file_path: str) -> tuple[bool, int]:
                         return True
             return False
 
+        def needs_split(xmin: float, xmax: float, ymin: float, ymax: float) -> bool:
+            w, h = xmax - xmin, ymax - ymin
+            return w * h > MAX_ROOM_AREA or max(w, h) > MAX_ROOM_ASPECT * min(w, h)
+
+        def door_interval(lo: float, hi: float) -> Tuple[float, float]:
+            """Door opening [d0, d1] along a wall whose free span is [lo, hi].
+
+            Either flush with a corner (no wall stub on that side) or with at
+            least MIN_DOOR_SIDE_WALL of wall on both sides, like real doors.
+            """
+            if hi - lo >= door_width + 2 * MIN_DOOR_SIDE_WALL and random.random() < 0.5:
+                d0 = random.uniform(lo + MIN_DOOR_SIDE_WALL,
+                                    hi - MIN_DOOR_SIDE_WALL - door_width)
+                return d0, d0 + door_width
+            if random.random() < 0.5:
+                return lo, lo + door_width
+            return hi - door_width, hi
+
+        rooms: List[Tuple[float, float, float, float]] = []
+        pending: List[Tuple[float, float, float, float]] = [(-half, half, -half, half)]
         split_count = 0
-        attempts = 0
-        max_attempts = 200
 
-        while split_count < target_splits and attempts < max_attempts:
-            attempts += 1
+        while pending:
+            xmin, xmax, ymin, ymax = pending.pop()
+            if not needs_split(xmin, xmax, ymin, ymax):
+                rooms.append((xmin, xmax, ymin, ymax))
+                continue
 
-            splittable = []
-            for idx, (xmin, xmax, ymin, ymax) in enumerate(rooms):
-                span_x = xmax - xmin
-                span_y = ymax - ymin
-
-                can_vertical = span_x >= (2 * min_room_span + wall_thickness)
-                can_horizontal = span_y >= (2 * min_room_span + wall_thickness)
-
-                if can_vertical or can_horizontal:
-                    splittable.append((idx, can_vertical, can_horizontal))
-
-            if not splittable:
-                break
-
-            room_idx, can_vertical, can_horizontal = random.choice(splittable)
-            xmin, xmax, ymin, ymax = rooms.pop(room_idx)
-
-            if can_vertical and can_horizontal:
-                orientation = random.choice(["vertical", "horizontal"])
-            elif can_vertical:
-                orientation = "vertical"
-            else:
-                orientation = "horizontal"
+            # Cut across the long axis: a vertical wall splits the x span.
+            vertical = (xmax - xmin) >= (ymax - ymin)
+            lo, hi = (xmin, xmax) if vertical else (ymin, ymax)
+            along_lo, along_hi = (ymin, ymax) if vertical else (xmin, xmax)
+            span, along = hi - lo, along_hi - along_lo
 
             split_success = False
-
             for _ in range(40):
-                if orientation == "vertical":
-                    split_x = random.uniform(xmin + min_room_span, xmax - min_room_span)
+                cut = lo + span * random.uniform(*SPLIT_FRACTION)
+                side = min(cut - lo, hi - cut)
+                if side < MIN_ROOM_SPAN or side * along < MIN_ROOM_AREA:
+                    continue
 
-                    door_center = random.uniform(
-                        ymin + door_width / 2.0,
-                        ymax - door_width / 2.0,
-                    )
-
-                    bottom_len = (door_center - door_width / 2.0) - ymin
-                    top_len = ymax - (door_center + door_width / 2.0)
-
-                    segments = []
-                    if bottom_len >= min_segment:
-                        segments.append((split_x, ymin + bottom_len / 2.0, wall_thickness, bottom_len))
-                    if top_len >= min_segment:
-                        segments.append((split_x, door_center + door_width / 2.0 + top_len / 2.0, wall_thickness, top_len))
-
-                    if not segments:
+                # Door is placed on the free span between the bounding walls.
+                d0, d1 = door_interval(along_lo + wall_thickness / 2.0,
+                                       along_hi - wall_thickness / 2.0)
+                segments = []
+                for s, e in ((along_lo, d0), (d1, along_hi)):
+                    # A flush door leaves only a piece hidden inside the
+                    # perpendicular wall – skip it.
+                    if e - s <= wall_thickness / 2.0 + 1e-6:
                         continue
+                    if vertical:
+                        segments.append((cut, (s + e) / 2.0, wall_thickness, e - s))
+                    else:
+                        segments.append(((s + e) / 2.0, cut, e - s, wall_thickness))
 
-                    if any(intersects_keep_out(x, y, sx, sy) for x, y, sx, sy in segments):
-                        continue
+                if any(intersects_keep_out(x, y, sx, sy) for x, y, sx, sy in segments):
+                    continue
+                if blocks_existing_door(segments):
+                    continue
 
-                    if blocks_existing_door(segments):
-                        continue
+                axis = 'v' if vertical else 'h'
+                for seg_idx, (x, y, sx, sy) in enumerate(segments):
+                    name = f"split_{split_count}_{axis}_{seg_idx}"
+                    walls.append(create_wall(name, x, y, sx, sy))
 
-                    for seg_idx, (x, y, sx, sy) in enumerate(segments):
-                        walls.append(create_wall(f"split_{split_count}_v_{seg_idx}", x, y, sx, sy))
-
-                    # Record the door opening: free gap in y at x = split_x.
-                    doors.append((
-                        split_x - wall_thickness / 2.0,
-                        split_x + wall_thickness / 2.0,
-                        door_center - door_width / 2.0,
-                        door_center + door_width / 2.0,
-                    ))
-
-                    rooms.append((xmin, split_x, ymin, ymax))
-                    rooms.append((split_x, xmax, ymin, ymax))
-                    split_success = True
-
+                m = MIN_DOOR_SIDE_WALL
+                if vertical:
+                    doors.append((cut - wall_thickness / 2.0, cut + wall_thickness / 2.0,
+                                  d0 - m, d1 + m))
+                    pending.append((xmin, cut, ymin, ymax))
+                    pending.append((cut, xmax, ymin, ymax))
                 else:
-                    split_y = random.uniform(ymin + min_room_span, ymax - min_room_span)
-
-                    door_center = random.uniform(
-                        xmin + door_width / 2.0,
-                        xmax - door_width / 2.0,
-                    )
-
-                    left_len = (door_center - door_width / 2.0) - xmin
-                    right_len = xmax - (door_center + door_width / 2.0)
-
-                    segments = []
-                    if left_len >= min_segment:
-                        segments.append((xmin + left_len / 2.0, split_y, left_len, wall_thickness))
-                    if right_len >= min_segment:
-                        segments.append((door_center + door_width / 2.0 + right_len / 2.0, split_y, right_len, wall_thickness))
-
-                    if not segments:
-                        continue
-
-                    if any(intersects_keep_out(x, y, sx, sy) for x, y, sx, sy in segments):
-                        continue
-
-                    if blocks_existing_door(segments):
-                        continue
-
-                    for seg_idx, (x, y, sx, sy) in enumerate(segments):
-                        walls.append(create_wall(f"split_{split_count}_h_{seg_idx}", x, y, sx, sy))
-
-                    # Record the door opening: free gap in x at y = split_y.
-                    doors.append((
-                        door_center - door_width / 2.0,
-                        door_center + door_width / 2.0,
-                        split_y - wall_thickness / 2.0,
-                        split_y + wall_thickness / 2.0,
-                    ))
-
-                    rooms.append((xmin, xmax, ymin, split_y))
-                    rooms.append((xmin, xmax, split_y, ymax))
-                    split_success = True
-
-                if split_success:
-                    split_count += 1
-                    break
+                    doors.append((d0 - m, d1 + m,
+                                  cut - wall_thickness / 2.0, cut + wall_thickness / 2.0))
+                    pending.append((xmin, xmax, ymin, cut))
+                    pending.append((xmin, xmax, cut, ymax))
+                split_count += 1
+                split_success = True
+                break
 
             if not split_success:
+                # Cannot be split validly (spawn keep-out, door clash or too
+                # small to halve) – keep it as one larger room.
                 rooms.append((xmin, xmax, ymin, ymax))
 
         # --------------------------------------------------
@@ -389,10 +370,11 @@ def generate_random_world(file_path: str) -> tuple[bool, int]:
         # shared /tmp file that running nodes read by default.
         write_world_meta(
             world_meta_path(file_path),
-            expected_traversable_cells, spawn_x, spawn_y,
+            expected_traversable_cells, spawn_x, spawn_y, world_size,
         )
         write_world_meta(
             WORLD_META_FILE, expected_traversable_cells, spawn_x, spawn_y,
+            world_size,
         )
 
         return True, expected_traversable_cells

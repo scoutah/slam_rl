@@ -3,7 +3,7 @@ import sys
 
 from ament_index_python import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import IncludeLaunchDescription, TimerAction, AppendEnvironmentVariable, ExecuteProcess, SetEnvironmentVariable
+from launch.actions import IncludeLaunchDescription, TimerAction, AppendEnvironmentVariable, ExecuteProcess, OpaqueFunction, SetEnvironmentVariable
 from launch.conditions import IfCondition, UnlessCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import PathJoinSubstitution, LaunchConfiguration, PythonExpression
@@ -11,6 +11,8 @@ from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
 
 from tb3_slam.utils import (
+    DEFAULT_WORLD_SIZE,
+    WALL_THICKNESS,
     generate_random_world,
     WORLD_META_FILE,
     spawn_pose,
@@ -18,15 +20,12 @@ from tb3_slam.utils import (
 )
 
 
-def generate_launch_description():
-    use_sim_time = LaunchConfiguration('use_sim_time', default='true')
-    headless = LaunchConfiguration('headless', default='false')
-    exploration_mode = LaunchConfiguration('exploration_mode', default='classic')
-    episode_file = LaunchConfiguration('episode_file', default='/tmp/slam_episode_done')
-    coverage_threshold = LaunchConfiguration('coverage_threshold', default='0.99')
-    max_episode_duration = LaunchConfiguration('max_episode_duration', default='600.0')
+def prepare_world(world_size: float) -> tuple[str, float, float]:
+    """Return (world_file, spawn_x, spawn_y) for this launch.
 
-    # If no world_file provided, generate a random one
+    Uses SLAM_WORLD_FILE if set (world_size is then ignored – a saved world
+    has its size baked in), otherwise generates a random world of world_size.
+    """
     world_file_val = os.environ.get('SLAM_WORLD_FILE', '')
     if world_file_val:
         world_file = world_file_val
@@ -48,7 +47,7 @@ def generate_launch_description():
         world_file = os.path.join(
             get_package_share_directory('tb3_slam'), 'worlds', 'random_world.sdf'
         )
-        success, _expected_cells = generate_random_world(world_file)
+        success, _expected_cells = generate_random_world(world_file, world_size)
         if not success:
             exit(-1)
 
@@ -61,22 +60,52 @@ def generate_launch_description():
         spawn_x = float(meta['spawn_x'])
         spawn_y = float(meta['spawn_y'])
     except (OSError, ValueError, KeyError):
-        spawn_x, spawn_y = spawn_pose(5.0, 0.15)
+        spawn_x, spawn_y = spawn_pose(DEFAULT_WORLD_SIZE, WALL_THICKNESS)
+    return world_file, spawn_x, spawn_y
+
+
+def generate_launch_description():
+    use_sim_time = LaunchConfiguration('use_sim_time', default='true')
+    headless = LaunchConfiguration('headless', default='false')
+    exploration_mode = LaunchConfiguration('exploration_mode', default='classic')
+    episode_file = LaunchConfiguration('episode_file', default='/tmp/slam_episode_done')
+    coverage_threshold = LaunchConfiguration('coverage_threshold', default='0.99')
+    max_episode_duration = LaunchConfiguration('max_episode_duration', default='600.0')
+    world_size = LaunchConfiguration('world_size', default=str(DEFAULT_WORLD_SIZE))
 
     launch_file_dir = os.path.join(get_package_share_directory('turtlebot3_gazebo'), 'launch')
     ros_gz_sim = get_package_share_directory('ros_gz_sim')
 
-    # ── Gazebo ──────────────────────────────────────────────────────────
+    # ── World + Gazebo server + robot spawn ─────────────────────────────
+    # The world is generated at launch time (not description time) so the
+    # world_size launch argument can be resolved first.
 
-    gzserver_cmd = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(
-            os.path.join(ros_gz_sim, 'launch', 'gz_sim.launch.py')
-        ),
-        launch_arguments={
-            'gz_args': ['-r -s -v2 ', world_file],
-            'on_exit_shutdown': 'true',
-        }.items(),
-    )
+    def launch_world(context):
+        world_file, spawn_x, spawn_y = prepare_world(
+            float(world_size.perform(context))
+        )
+        gzserver_cmd = IncludeLaunchDescription(
+            PythonLaunchDescriptionSource(
+                os.path.join(ros_gz_sim, 'launch', 'gz_sim.launch.py')
+            ),
+            launch_arguments={
+                'gz_args': ['-r -s -v2 ', world_file],
+                'on_exit_shutdown': 'true',
+            }.items(),
+        )
+        spawn_turtlebot_cmd = IncludeLaunchDescription(
+            PythonLaunchDescriptionSource(
+                os.path.join(launch_file_dir, 'spawn_turtlebot3.launch.py')
+            ),
+            launch_arguments={
+                'x_pose': str(spawn_x),
+                'y_pose': str(spawn_y),
+                'use_sim_time': use_sim_time,
+            }.items(),
+        )
+        return [gzserver_cmd, spawn_turtlebot_cmd]
+
+    # ── Gazebo GUI ──────────────────────────────────────────────────────
 
     gzclient_cmd = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
@@ -94,17 +123,6 @@ def generate_launch_description():
     )
 
     robot_state_publisher_delayed = TimerAction(period=2.0, actions=[robot_state_publisher_cmd])
-
-    spawn_turtlebot_cmd = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(
-            os.path.join(launch_file_dir, 'spawn_turtlebot3.launch.py')
-        ),
-        launch_arguments={
-            'x_pose': str(spawn_x),
-            'y_pose': str(spawn_y),
-            'use_sim_time': use_sim_time,
-        }.items(),
-    )
 
     set_env_vars_resources = AppendEnvironmentVariable(
         'GZ_SIM_RESOURCE_PATH',
@@ -245,9 +263,8 @@ def generate_launch_description():
         SetEnvironmentVariable('RCUTILS_LOGGING_SEVERITY_THRESHOLD', 'WARN'),
         set_env_vars_resources,
         inject_venv,
-        gzserver_cmd,
+        OpaqueFunction(function=launch_world),
         gzclient_cmd,
-        spawn_turtlebot_cmd,
         robot_state_publisher_delayed,
         turtlebot3_cartographer_launch_delayed,
         startup_spin_delayed,

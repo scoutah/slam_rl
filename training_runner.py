@@ -8,17 +8,19 @@ Results are written to a per-run CSV file in results/.
 Usage:
     python3 training_runner.py [--mode classic|rl] [--episodes N]
                                [--timeout SECONDS] [--threshold FLOAT]
-                               [--headless] [--world PATH]
+                               [--headless] [--world PATH] [--world-size METRES]
 
 Examples:
     python3 training_runner.py --mode classic --episodes 20
     python3 training_runner.py --mode rl --episodes 100 --headless
+    python3 training_runner.py --world-size 10 --randomize-worlds --episodes 20
     python3 training_runner.py --world worlds/abc123.sdf --episodes 5
 """
 
 import argparse
 import csv
 import io
+import json
 import os
 import re
 import shutil
@@ -76,12 +78,18 @@ def start_filtered_readers(proc: subprocess.Popen) -> list[threading.Thread]:
 # World generation
 # ---------------------------------------------------------------------------
 
-def prepare_world(world_arg: str | None, run_id: str, save: bool = False) -> Path:
+def prepare_world(
+    world_arg: str | None,
+    run_id: str,
+    save: bool = False,
+    world_size: float | None = None,
+) -> Path:
     """
     Return the path to the .sdf world file to use for this run.
 
     If *world_arg* is given, use that file directly (no copy).
-    Otherwise generate a new random world via tb3_slam.utils.
+    Otherwise generate a new random world via tb3_slam.utils, with edge
+    length *world_size* (generator default if None).
     When *save* is True, persist to worlds/<run_id>.sdf; otherwise
     write to /tmp/ (ephemeral).
     """
@@ -93,19 +101,28 @@ def prepare_world(world_arg: str | None, run_id: str, save: bool = False) -> Pat
         return p
 
     # Import here so the script can still --help without a colcon workspace
-    from tb3_slam.utils import generate_random_world
+    from tb3_slam.utils import DEFAULT_WORLD_SIZE, generate_random_world
 
     if save:
         WORLDS_DIR.mkdir(parents=True, exist_ok=True)
         world_path = WORLDS_DIR / f'{run_id}.sdf'
     else:
         world_path = Path(f'/tmp/slam_world_{run_id}.sdf')
-    success, _ = generate_random_world(str(world_path))
+    success, _ = generate_random_world(str(world_path), world_size or DEFAULT_WORLD_SIZE)
     if not success:
         print('[runner] ERROR: world generation failed', file=sys.stderr)
         sys.exit(1)
     print(f'[runner] World saved to {world_path}')
     return world_path
+
+
+def read_world_size(world_file: Path) -> float | None:
+    """World edge length from the world's metadata sidecar, if recorded."""
+    try:
+        meta = json.loads(world_file.with_suffix('.meta.json').read_text())
+        return float(meta['world_size'])
+    except (OSError, ValueError, KeyError):
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -136,13 +153,14 @@ def append_result(
     """Append one episode result row to the CSV result file."""
     try:
         coverage = _parse_coverage(reason)
+        world_size = read_world_size(world_file) if world_file is not None else None
         write_header = not result_file.exists()
 
         with result_file.open('a', newline='') as f:
             writer = csv.writer(f, delimiter=';')
             if write_header:
                 writer.writerow(['timestamp', 'episode', 'mode', 'reason',
-                                 'elapsed_s', 'coverage', 'world'])
+                                 'elapsed_s', 'coverage', 'world', 'world_size'])
             writer.writerow([
                 datetime.now().isoformat(timespec='seconds'),
                 episode,
@@ -151,6 +169,7 @@ def append_result(
                 f'{elapsed:.1f}',
                 f'{coverage:.4f}' if coverage is not None else '',
                 world_file.name if world_file is not None else '',
+                world_size if world_size is not None else '',
             ])
     except Exception as exc:
         print(f'[runner] ERROR writing result to {result_file}: {exc}', file=sys.stderr)
@@ -265,10 +284,12 @@ def run(
     result_file: Path,
     randomize_worlds: bool = False,
     save_worlds: bool = False,
+    world_size: float | None = None,
 ) -> None:
     print(f'[runner] Starting episodic training: mode={mode}, episodes={n_episodes}')
     print(f'         threshold={threshold:.0%}, timeout={timeout:.0f}s, headless={headless}')
     print(f'         world    → {world_file}' + (' (new each episode)' if randomize_worlds else ''))
+    print(f'         world size: {read_world_size(world_file) or "unknown"} m')
     print(f'         results  → {result_file}')
     print(f'         filtered nodes: {LOG_FILTER}')
 
@@ -278,14 +299,14 @@ def run(
         print(f'\n[runner] ═══ Episode {episode}/{n_episodes} ═══')
 
         if randomize_worlds and episode > 1:
-            from tb3_slam.utils import generate_random_world
+            from tb3_slam.utils import DEFAULT_WORLD_SIZE, generate_random_world
             ep_id = uuid.uuid4().hex[:8]
             if save_worlds:
                 WORLDS_DIR.mkdir(parents=True, exist_ok=True)
                 world_file = WORLDS_DIR / f'{ep_id}.sdf'
             else:
                 world_file = Path(f'/tmp/slam_world_{ep_id}.sdf')
-            success, _ = generate_random_world(str(world_file))
+            success, _ = generate_random_world(str(world_file), world_size or DEFAULT_WORLD_SIZE)
             if not success:
                 print('[runner] ERROR: world generation failed', file=sys.stderr)
                 continue
@@ -354,14 +375,20 @@ def main() -> None:
                         help='Skip Gazebo GUI client')
     parser.add_argument('--world', type=str, default=None,
                         help='Path to an existing .sdf world file (skip generation)')
+    parser.add_argument('--world-size', type=float, default=None,
+                        help='Edge length in metres of generated square worlds '
+                             '(default: generator default, see tb3_slam.utils)')
     parser.add_argument('--randomize-worlds', action='store_true',
                         help='Generate a new random world for each episode')
     parser.add_argument('--save-worlds', action='store_true',
                         help='Persist generated worlds to worlds/ (default: /tmp/)')
     args = parser.parse_args()
+    if args.world and args.world_size is not None and not args.randomize_worlds:
+        parser.error('--world-size has no effect with --world (size is baked into the SDF)')
 
     run_id = uuid.uuid4().hex[:8]
-    world_file = prepare_world(args.world, run_id, save=args.save_worlds)
+    world_file = prepare_world(args.world, run_id, save=args.save_worlds,
+                               world_size=args.world_size)
     result_file = make_result_path(args.mode, run_id)
 
     try:
@@ -375,6 +402,7 @@ def main() -> None:
             result_file=result_file,
             randomize_worlds=args.randomize_worlds,
             save_worlds=args.save_worlds,
+            world_size=args.world_size,
         )
     except KeyboardInterrupt:
         print('\n[runner] Interrupted by user.')

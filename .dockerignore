@@ -23,8 +23,8 @@ __pycache__/
 .gitignore
 .DS_Store
 
-# Docker's own files
+# Docker's own files. Note: docker/ is NOT excluded – the Dockerfile COPYs
+# docker/entrypoint.sh from the build context.
 Dockerfile
 .dockerignore
-docker/
 compose.yaml

@@ -129,6 +129,7 @@ python3 training_runner.py --help
 | `--threshold` | `0.99` | Coverage-Schwellwert für Episodenende |
 | `--headless` | `false` | Gazebo-GUI deaktivieren |
 | `--world` | – | Pfad zu einer bestehenden `.sdf`-Welt (überspringt die Generierung) |
+| `--world-size` | `8` | Kantenlänge generierter quadratischer Welten in m; nur `8` (8 × 8 m) oder `12` (12 × 12 m) |
 | `--randomize-worlds` | `false` | Pro Episode eine neue Zufallswelt generieren |
 | `--save-worlds` | `false` | Generierte Welten in `worlds/` ablegen (Standard: `/tmp/`) |
 

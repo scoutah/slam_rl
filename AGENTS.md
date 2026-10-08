@@ -122,7 +122,8 @@ Default (`DEFAULT_WORLD_SIZE`) is 8.
   from existing doors (no wall stubs, door never narrowed). The room graph is a tree
   (no loops, no open-plan openings – deliberately out of scope).
 - Split walls may not enter a keep-out box of ±`SPAWN_KEEP_OUT` (0.5 m) **around both
-  spawn points** (one box spanning both, so no wall ends up between the robots).
+  spawn points** (one box spanning both), and no cut may pass between the spawns
+  (`separates_spawns`), so both robots always start in the same room.
 - Writes the metadata (traversable cells, `spawns: [[x, y], [x, y]]`, `world_size`).
 
 Nothing in Cartographer (`turtlebot3_lds_2d.lua`, unbounded submaps) or Nav2 default params

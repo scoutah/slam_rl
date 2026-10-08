@@ -12,11 +12,10 @@ from launch_ros.substitutions import FindPackageShare
 
 from tb3_slam.utils import (
     DEFAULT_WORLD_SIZE,
-    WALL_THICKNESS,
     check_world_size,
     generate_random_world,
+    load_spawns,
     WORLD_META_FILE,
-    spawn_pose,
     world_meta_path,
 )
 
@@ -52,16 +51,12 @@ def prepare_world(world_size: float) -> tuple[str, float, float]:
         if not success:
             exit(-1)
 
-    # The generator writes the robot spawn (edge of the room, scales with world
-    # size) into the world metadata. Fall back to the default world geometry if
-    # a pre-made world is used without fresh metadata.
-    try:
-        import json
-        meta = json.loads(WORLD_META_FILE.read_text())
-        spawn_x = float(meta['spawn_x'])
-        spawn_y = float(meta['spawn_y'])
-    except (OSError, ValueError, KeyError):
-        spawn_x, spawn_y = spawn_pose(DEFAULT_WORLD_SIZE, WALL_THICKNESS)
+    # The generator writes both robot spawns (side by side at the room edge,
+    # scale with world size) into the world metadata; load_spawns falls back
+    # to the default geometry if a pre-made world has no fresh metadata.
+    # Single-robot stack for now: robot 1 uses the first spawn (#8 adds the
+    # second robot at spawns[1]).
+    spawn_x, spawn_y = load_spawns(WORLD_META_FILE)[0]
     return world_file, spawn_x, spawn_y
 
 

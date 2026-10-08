@@ -21,6 +21,16 @@ MIN_PATH_WIDTH: float = 1.1
 # footprint plus Nav2 inflation so the spawn is never inside an (inflated) wall.
 SPAWN_WALL_MARGIN: float = 0.7
 
+# Two robots start side by side at the same entry (mirrored around x = 0),
+# both facing into the world. Centre distance: the Burger footprint is
+# ~0.21 m wide, so 1.0 m keeps both footprints (plus a 0.4 m clearance
+# each) apart, and the other robot stays outside the Nav2 inflation radius.
+NUM_ROBOTS: int = 2
+SPAWN_SEPARATION: float = 1.0
+# Robot-scale clearance around each spawn that split walls may not enter,
+# independent of world size.
+SPAWN_KEEP_OUT: float = 0.5
+
 # Edge length of the square world in metres. Only the two study sizes are
 # valid (8 x 8 m and 12 x 12 m), selected per world via the world_size
 # argument (launch arg / training_runner --world-size).
@@ -48,7 +58,7 @@ def world_meta_path(world_file: str) -> Path:
     """Sidecar metadata path for a given world SDF.
 
     Metadata is stored next to the world (``<world>.meta.json``) so a saved
-    world carries its own coverage denominator and spawn pose, instead of
+    world carries its own coverage denominator and spawn poses, instead of
     relying on the shared /tmp file which only describes the *last generated*
     world.
     """
@@ -56,26 +66,55 @@ def world_meta_path(world_file: str) -> Path:
 
 
 def write_world_meta(path: Path, expected_traversable_cells: int,
-                     spawn_x: float, spawn_y: float, world_size: float) -> None:
-    """Write world metadata (traversable cells, spawn pose, size) as JSON."""
+                     spawns: List[Tuple[float, float]], world_size: float) -> None:
+    """Write world metadata (traversable cells, spawn poses, size) as JSON.
+
+    spawns holds one (x, y) per robot, in robot order.
+    """
     path.write_text(
         json.dumps({
             'expected_traversable_cells': expected_traversable_cells,
-            'spawn_x': spawn_x,
-            'spawn_y': spawn_y,
+            'spawns': [[x, y] for x, y in spawns],
             'world_size': world_size,
         })
     )
 
 
-def spawn_pose(world_size: float, wall_thickness: float) -> Tuple[float, float]:
-    """Robot spawn (x, y): centred in x, just inside the south wall.
+def spawn_poses(world_size: float,
+                wall_thickness: float = WALL_THICKNESS) -> List[Tuple[float, float]]:
+    """Robot spawns [(x, y), ...]: side by side, just inside the south wall.
 
-    Derived from world_size so it stays at the edge when worlds grow larger.
+    One pose per robot (NUM_ROBOTS), SPAWN_SEPARATION apart and centred in x.
+    Derived from world_size so they stay at the edge when worlds grow larger.
     """
     half = world_size / 2.0
     y = -half + wall_thickness / 2.0 + SPAWN_WALL_MARGIN
-    return (0.0, y)
+    offset = (NUM_ROBOTS - 1) / 2.0
+    return [((i - offset) * SPAWN_SEPARATION, y) for i in range(NUM_ROBOTS)]
+
+
+def load_spawns(meta_path: Path) -> List[Tuple[float, float]]:
+    """Robot spawns [(x, y), ...] from a world metadata file.
+
+    Single source for the launch file and tools, so they place the robots
+    exactly where the generator kept the space free. Falls back to the
+    default geometry (of the recorded world_size, if any) when the file is
+    missing or predates multi-robot spawns.
+    """
+    try:
+        meta = json.loads(Path(meta_path).read_text())
+    except (OSError, ValueError):
+        return spawn_poses(DEFAULT_WORLD_SIZE)
+    try:
+        spawns = [(float(x), float(y)) for x, y in meta['spawns']]
+        if len(spawns) == NUM_ROBOTS:
+            return spawns
+    except (KeyError, TypeError, ValueError):
+        pass
+    try:
+        return spawn_poses(float(meta['world_size']))
+    except (KeyError, TypeError, ValueError):
+        return spawn_poses(DEFAULT_WORLD_SIZE)
 
 
 def check_world_size(world_size: float) -> float:
@@ -93,7 +132,7 @@ def generate_random_world(
     Generates a closed square Gazebo SDF world (world_size x world_size m)
     with house-like interior rooms; the number of rooms follows the area.
     Writes the world to file_path and writes expected traversable cell count
-    (plus spawn pose) both to a sidecar next to the world (``<world>.meta.json``,
+    (plus spawn poses) both to a sidecar next to the world (``<world>.meta.json``,
     so a saved world can be reused via --world with the correct coverage
     denominator) and to the shared WORLD_META_FILE that running nodes read.
 
@@ -109,13 +148,19 @@ def generate_random_world(
     try:
         wall_height = 1.2
         wall_thickness = WALL_THICKNESS
-        # Robot-scale clearance around the spawn, independent of world size.
-        keep_out_half = 0.5
 
         half = world_size / 2.0
 
-        # Robot spawns near the south wall (edge entry), not the centre.
-        spawn_x, spawn_y = spawn_pose(world_size, wall_thickness)
+        # Robots spawn side by side near the south wall (edge entry).
+        spawns = spawn_poses(world_size, wall_thickness)
+        # One keep-out box around all spawns (not one square each), so no
+        # wall can end up between the robots either.
+        keep_out = (
+            min(x for x, _ in spawns) - SPAWN_KEEP_OUT,
+            max(x for x, _ in spawns) + SPAWN_KEEP_OUT,
+            min(y for _, y in spawns) - SPAWN_KEEP_OUT,
+            max(y for _, y in spawns) + SPAWN_KEEP_OUT,
+        )
 
         # Track footprint area of every wall to derive free-space estimate
         _wall_areas: List[float] = []
@@ -162,11 +207,12 @@ def generate_random_world(
             min_y = center_y - half_y
             max_y = center_y + half_y
 
+            ko_xmin, ko_xmax, ko_ymin, ko_ymax = keep_out
             return not (
-                max_x <= spawn_x - keep_out_half
-                or min_x >= spawn_x + keep_out_half
-                or max_y <= spawn_y - keep_out_half
-                or min_y >= spawn_y + keep_out_half
+                max_x <= ko_xmin
+                or min_x >= ko_xmax
+                or max_y <= ko_ymin
+                or min_y >= ko_ymax
             )
 
         # --------------------------------------------------
@@ -384,11 +430,10 @@ def generate_random_world(
         # shared /tmp file that running nodes read by default.
         write_world_meta(
             world_meta_path(file_path),
-            expected_traversable_cells, spawn_x, spawn_y, world_size,
+            expected_traversable_cells, spawns, world_size,
         )
         write_world_meta(
-            WORLD_META_FILE, expected_traversable_cells, spawn_x, spawn_y,
-            world_size,
+            WORLD_META_FILE, expected_traversable_cells, spawns, world_size,
         )
 
         return True, expected_traversable_cells

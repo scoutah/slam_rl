@@ -158,3 +158,28 @@ def test_no_short_wall_stubs(tmp_path, monkeypatch):
         assert utils.generate_random_world(str(world), 12.0)[0]
         for sx, sy in _split_walls(world):
             assert max(sx, sy) >= utils.MIN_DOOR_SIDE_WALL
+
+
+@pytest.mark.parametrize('world_size', utils.WORLD_SIZES)
+def test_spawns_share_a_room(tmp_path, monkeypatch, world_size):
+    # No cut may pass between the spawns, even where the keep-out box would
+    # allow it (disabled here), so both robots always start in the same room.
+    monkeypatch.setattr(utils, 'WORLD_META_FILE', tmp_path / 'shared_meta.json')
+    monkeypatch.setattr(utils, 'SPAWN_KEEP_OUT', -1.0)
+    (x1, _), (x2, _) = utils.spawn_poses(world_size)
+    half = world_size / 2.0
+    random.seed(3)
+    for i in range(30):
+        world = tmp_path / f'w{i}.sdf'
+        assert utils.generate_random_world(str(world), world_size)[0]
+        cuts: dict[str, list[tuple[float, float, float, float]]] = {}
+        for name, x, y, sx, sy in _wall_boxes(world):
+            if name.startswith('split_') and '_v_' in name:
+                cuts.setdefault(name.rsplit('_', 1)[0], []).append((x, y, sx, sy))
+        for name, segs in cuts.items():
+            cut_x = segs[0][0]
+            # Rooms are >= MIN_ROOM_SPAN deep, so a cut reaching below this
+            # line splits the room at the south wall, where the robots start.
+            bottom = min(y - sy / 2 for _, y, _, sy in segs)
+            in_spawn_room = bottom < -half + utils.MIN_ROOM_SPAN
+            assert not (in_spawn_room and min(x1, x2) < cut_x < max(x1, x2)), name

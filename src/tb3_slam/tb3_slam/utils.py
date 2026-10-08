@@ -215,6 +215,19 @@ def generate_random_world(
                 or min_y >= ko_ymax
             )
 
+        def separates_spawns(room: Tuple[float, float, float, float],
+                             vertical: bool, cut: float) -> bool:
+            """True if cutting room at cut would put the robots in different rooms.
+
+            Guarantees a shared start room by design. The keep-out box alone
+            only does so incidentally: a door gap (MIN_PATH_WIDTH) could
+            otherwise line up with the box and let a separating wall pass.
+            """
+            xmin, xmax, ymin, ymax = room
+            coords = [x if vertical else y for x, y in spawns
+                      if xmin < x < xmax and ymin < y < ymax]
+            return any(c < cut for c in coords) and any(c > cut for c in coords)
+
         # --------------------------------------------------
         # 1. Outer boundary (closed box room)
         # --------------------------------------------------
@@ -303,6 +316,8 @@ def generate_random_world(
                 side = min(cut - lo, hi - cut)
                 if side < MIN_ROOM_SPAN or side * along < MIN_ROOM_AREA:
                     continue
+                if separates_spawns((xmin, xmax, ymin, ymax), vertical, cut):
+                    continue
 
                 # Door is placed on the free span between the bounding walls.
                 d0, d1 = door_interval(along_lo + wall_thickness / 2.0,
@@ -344,7 +359,7 @@ def generate_random_world(
                 break
 
             if not split_success:
-                # Cannot be split validly (spawn keep-out, door clash or too
+                # Cannot be split validly (spawn keep-out or separation, door clash or too
                 # small to halve) – keep it as one larger room.
                 rooms.append((xmin, xmax, ymin, ymax))
 

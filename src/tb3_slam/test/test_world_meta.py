@@ -135,13 +135,15 @@ def _split_walls(sdf: Path) -> list[tuple[float, float]]:
     return [tuple(map(float, m.split()[:2])) for m in models]
 
 
-@pytest.mark.parametrize('world_size, min_rooms, max_rooms', [(8.0, 3, 7), (12.0, 7, 15)])
+@pytest.mark.parametrize('world_size, min_rooms, max_rooms', [(8.0, 5, 10), (12.0, 13, 24)])
 def test_room_count_follows_area(tmp_path, monkeypatch, world_size, min_rooms, max_rooms):
     # Rooms are split until house-sized (MIN_ROOM_AREA..MAX_ROOM_AREA), so the
     # room count is roughly area / mean room size, not a fixed split count.
+    # 200 worlds: rare failures (e.g. a world left unsplit because the spawn
+    # keep-out blocks every cut on the long axis) only show up in larger samples.
     monkeypatch.setattr(utils, 'WORLD_META_FILE', tmp_path / 'shared_meta.json')
     random.seed(0)
-    for i in range(20):
+    for i in range(200):
         world = tmp_path / f'w{i}.sdf'
         assert utils.generate_random_world(str(world), world_size)[0]
         rooms = len(set(re.findall(r'name="split_(\d+)_', world.read_text()))) + 1

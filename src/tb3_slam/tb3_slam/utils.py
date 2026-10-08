@@ -39,7 +39,7 @@ DEFAULT_WORLD_SIZE: float = WORLD_SIZES[0]
 WALL_THICKNESS: float = 0.15
 
 # House-like room geometry for the BSP generator. Rooms are split until they
-# are at most MAX_ROOM_AREA (bedroom .. living room); a cut never leaves a room
+# are at most MAX_ROOM_AREA (small room size); a cut never leaves a room
 # smaller than MIN_ROOM_AREA or narrower than MIN_ROOM_SPAN.
 MIN_ROOM_AREA: float = 5.0    # m²
 MAX_ROOM_AREA: float = 9.0   # m²
@@ -245,7 +245,8 @@ def generate_random_world(
         # MAX_ROOM_ASPECT (stop criterion instead of a fixed split count, so
         # the room count follows the world area). Each cut runs across the
         # room's long axis near its middle (kd-tree style), which avoids
-        # slivers and corridor-like strips. Every split wall gets one door, so
+        # slivers and corridor-like strips; only if that is impossible is the
+        # other axis tried. Every split wall gets one door, so
         # all rooms stay connected. Room bounds are wall centre lines.
         door_width = MIN_PATH_WIDTH
 
@@ -304,59 +305,64 @@ def generate_random_world(
                 rooms.append((xmin, xmax, ymin, ymax))
                 continue
 
-            # Cut across the long axis: a vertical wall splits the x span.
-            vertical = (xmax - xmin) >= (ymax - ymin)
-            lo, hi = (xmin, xmax) if vertical else (ymin, ymax)
-            along_lo, along_hi = (ymin, ymax) if vertical else (xmin, xmax)
-            span, along = hi - lo, along_hi - along_lo
-
+            # Cut across the long axis: a vertical wall splits the x span. If
+            # no valid cut exists there (e.g. the middle of a square world is
+            # taken by the spawn keep-out), try the other axis before giving up.
+            long_vertical = (xmax - xmin) >= (ymax - ymin)
             split_success = False
-            for _ in range(40):
-                cut = lo + span * random.uniform(*SPLIT_FRACTION)
-                side = min(cut - lo, hi - cut)
-                if side < MIN_ROOM_SPAN or side * along < MIN_ROOM_AREA:
-                    continue
-                if separates_spawns((xmin, xmax, ymin, ymax), vertical, cut):
-                    continue
+            for vertical in (long_vertical, not long_vertical):
+                lo, hi = (xmin, xmax) if vertical else (ymin, ymax)
+                along_lo, along_hi = (ymin, ymax) if vertical else (xmin, xmax)
+                span, along = hi - lo, along_hi - along_lo
 
-                # Door is placed on the free span between the bounding walls.
-                d0, d1 = door_interval(along_lo + wall_thickness / 2.0,
-                                       along_hi - wall_thickness / 2.0)
-                segments = []
-                for s, e in ((along_lo, d0), (d1, along_hi)):
-                    # A flush door leaves only a piece hidden inside the
-                    # perpendicular wall – skip it.
-                    if e - s <= wall_thickness / 2.0 + 1e-6:
+                for _ in range(40):
+                    cut = lo + span * random.uniform(*SPLIT_FRACTION)
+                    side = min(cut - lo, hi - cut)
+                    if side < MIN_ROOM_SPAN or side * along < MIN_ROOM_AREA:
                         continue
+                    if separates_spawns((xmin, xmax, ymin, ymax), vertical, cut):
+                        continue
+
+                    # Door is placed on the free span between the bounding walls.
+                    d0, d1 = door_interval(along_lo + wall_thickness / 2.0,
+                                           along_hi - wall_thickness / 2.0)
+                    segments = []
+                    for s, e in ((along_lo, d0), (d1, along_hi)):
+                        # A flush door leaves only a piece hidden inside the
+                        # perpendicular wall – skip it.
+                        if e - s <= wall_thickness / 2.0 + 1e-6:
+                            continue
+                        if vertical:
+                            segments.append((cut, (s + e) / 2.0, wall_thickness, e - s))
+                        else:
+                            segments.append(((s + e) / 2.0, cut, e - s, wall_thickness))
+
+                    if any(intersects_keep_out(x, y, sx, sy) for x, y, sx, sy in segments):
+                        continue
+                    if blocks_existing_door(segments):
+                        continue
+
+                    axis = 'v' if vertical else 'h'
+                    for seg_idx, (x, y, sx, sy) in enumerate(segments):
+                        name = f"split_{split_count}_{axis}_{seg_idx}"
+                        walls.append(create_wall(name, x, y, sx, sy))
+
+                    m = MIN_DOOR_SIDE_WALL
                     if vertical:
-                        segments.append((cut, (s + e) / 2.0, wall_thickness, e - s))
+                        doors.append((cut - wall_thickness / 2.0, cut + wall_thickness / 2.0,
+                                      d0 - m, d1 + m))
+                        pending.append((xmin, cut, ymin, ymax))
+                        pending.append((cut, xmax, ymin, ymax))
                     else:
-                        segments.append(((s + e) / 2.0, cut, e - s, wall_thickness))
-
-                if any(intersects_keep_out(x, y, sx, sy) for x, y, sx, sy in segments):
-                    continue
-                if blocks_existing_door(segments):
-                    continue
-
-                axis = 'v' if vertical else 'h'
-                for seg_idx, (x, y, sx, sy) in enumerate(segments):
-                    name = f"split_{split_count}_{axis}_{seg_idx}"
-                    walls.append(create_wall(name, x, y, sx, sy))
-
-                m = MIN_DOOR_SIDE_WALL
-                if vertical:
-                    doors.append((cut - wall_thickness / 2.0, cut + wall_thickness / 2.0,
-                                  d0 - m, d1 + m))
-                    pending.append((xmin, cut, ymin, ymax))
-                    pending.append((cut, xmax, ymin, ymax))
-                else:
-                    doors.append((d0 - m, d1 + m,
-                                  cut - wall_thickness / 2.0, cut + wall_thickness / 2.0))
-                    pending.append((xmin, xmax, ymin, cut))
-                    pending.append((xmin, xmax, cut, ymax))
-                split_count += 1
-                split_success = True
-                break
+                        doors.append((d0 - m, d1 + m,
+                                      cut - wall_thickness / 2.0, cut + wall_thickness / 2.0))
+                        pending.append((xmin, xmax, ymin, cut))
+                        pending.append((xmin, xmax, cut, ymax))
+                    split_count += 1
+                    split_success = True
+                    break
+                if split_success:
+                    break
 
             if not split_success:
                 # Cannot be split validly (spawn keep-out or separation, door clash or too

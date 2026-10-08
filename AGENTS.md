@@ -113,10 +113,12 @@ launch file, `training_runner.py` and `check_world_connectivity.py` reject other
 Default (`DEFAULT_WORLD_SIZE`) is 8.
 
 - **Stop criterion, not a split count:** a room is split while it is > `MAX_ROOM_AREA`
-  (20 m²) or more elongated than `MAX_ROOM_ASPECT` (2.5); no cut leaves a room
-  < `MIN_ROOM_AREA` (9 m²) or narrower than `MIN_ROOM_SPAN` (2 m). The room count therefore
-  follows the area (≈ 5 rooms on 8 × 8 m, ≈ 11 on 12 × 12 m, ~13 m² each).
+  (9 m²) or more elongated than `MAX_ROOM_ASPECT` (2.5); no cut leaves a room
+  < `MIN_ROOM_AREA` (5 m²) or narrower than `MIN_ROOM_SPAN` (2 m). The room count therefore
+  follows the area (≈ 8 rooms on 8 × 8 m, ≈ 18 on 12 × 12 m, ~8 m² each).
 - Cuts run across the room's long side at 35–65 % of it (`SPLIT_FRACTION`) – no slivers/strips.
+  Only if no valid cut exists there (e.g. the middle of the square 8 × 8 m world is taken by
+  the spawn keep-out) is the other axis tried; otherwise the room stays unsplit.
 - Each split wall gets one door of `MIN_PATH_WIDTH = 1.1 m`, either flush with a corner or
   with ≥ `MIN_DOOR_SIDE_WALL` (0.8 m) wall on both sides; later walls keep that distance
   from existing doors (no wall stubs, door never narrowed). The room graph is a tree

@@ -49,7 +49,7 @@ Three ament_python packages in `src/`:
 world generated at launch time in an `OpaqueFunction` (so the `world_size` launch arg is
 resolved; skipped if env `SLAM_WORLD_FILE` is set) →
 gz server (+ GUI unless headless) → spawn robot near the south wall (edge entry,
-scales with world size; written to world metadata by the generator) → 2 s robot_state_publisher
+scales with world size; `spawns[0]` of the world metadata until #8 adds robot 2) → 2 s robot_state_publisher
 → 5 s Cartographer (`turtlebot3_cartographer`) → 6 s startup spin (4 s of TwistStamped on
 `/cmd_vel`) → 10 s Nav2 (`nav2_bringup/navigation_launch.py`, default params) →
 20 s exploration node. `episode_manager` and `cmd_vel_relay` start immediately.
@@ -62,7 +62,7 @@ scales with world size; written to world metadata by the generator) → 2 s robo
 - All topics/frames are **global, single-robot** (`/map`, `/cmd_vel`, `map`→`base_link`).
 
 **Inter-process files in `/tmp`**
-- `/tmp/slam_world_meta.json` – `expected_traversable_cells` (+ spawn, `world_size`), written by
+- `/tmp/slam_world_meta.json` – `expected_traversable_cells` (+ `spawns`, `world_size`), written by
   `generate_random_world`, read by `coverage_monitor.load_expected_cells()`. The generator
   also writes a sidecar `<world>.meta.json` next to each SDF; the launch file copies that
   sidecar into this file when a saved world is reused via `SLAM_WORLD_FILE`/`--world`.
@@ -121,8 +121,9 @@ Default (`DEFAULT_WORLD_SIZE`) is 8.
   with ≥ `MIN_DOOR_SIDE_WALL` (0.8 m) wall on both sides; later walls keep that distance
   from existing doors (no wall stubs, door never narrowed). The room graph is a tree
   (no loops, no open-plan openings – deliberately out of scope).
-- Split walls may not enter a keep-out square of ±0.5 m **around the spawn point**.
-- Writes the metadata (traversable cells, spawn x/y, `world_size`).
+- Split walls may not enter a keep-out box of ±`SPAWN_KEEP_OUT` (0.5 m) **around both
+  spawn points** (one box spanning both, so no wall ends up between the robots).
+- Writes the metadata (traversable cells, `spawns: [[x, y], [x, y]]`, `world_size`).
 
 Nothing in Cartographer (`turtlebot3_lds_2d.lua`, unbounded submaps) or Nav2 default params
 (global costmap sized from `/map`, rolling 3 × 3 m local costmap) depends on world size.
@@ -131,10 +132,15 @@ Nothing in Cartographer (`turtlebot3_lds_2d.lua`, unbounded submaps) or Nav2 def
 connected with `check_world_connectivity.py --world-size 8 12` (clearances 0.22–0.40 m).
 The episode timeout for these sizes is decided in #10 / #15 (600 s was tuned for 5 × 5 m).
 
-The spawn is derived from `world_size` by `spawn_pose()` in utils.py (centred in x, just
-inside the south wall) and written to the world metadata. The launch file and
-`check_world_connectivity.py` both read it from there, so it scales with the world and
-cannot drift. To move the spawn, change `spawn_pose` / `SPAWN_WALL_MARGIN` only.
+**Spawns (two robots, #6):** derived deterministically from `world_size` by `spawn_poses()`
+in utils.py – side by side at the same entry, `SPAWN_SEPARATION` (1.0 m) apart, mirrored
+around x = 0, just inside the south wall – and written to the world metadata. The launch file
+and `check_world_connectivity.py` both read them via `load_spawns()` (falls back to the
+default geometry for missing/legacy single-spawn metadata), so they scale with the world and
+cannot drift. To move the spawns, change `spawn_poses` / `SPAWN_WALL_MARGIN` /
+`SPAWN_SEPARATION` only. The connectivity check reports per robot whether the spawn is
+blocked (in inflated wall) or stranded (not in the main free region), and whether the two
+robots' clearance discs overlap.
 
 ## Known issues (state at start of WS 2026/27)
 

@@ -50,11 +50,14 @@ services:
 
   # Training runner. Does NOT mount src/: it runs the code baked into the image
   # at build time, so a run is reproducible. Rebuild the image to pick up code
-  # changes. Append args, e.g.:
-  #   docker compose run --rm train --mode classic --episodes 20 --headless
+  # changes. Uses the train.sh entrypoint, which runs training_runner.py and
+  # forwards all args to it, so you can pass runner flags directly:
+  #   docker compose run --rm train --episodes 1 --headless
+  #   docker compose run --rm train --mode rl --episodes 50 --headless
+  # With no extra args the `command` below provides sensible defaults.
   train:
     <<: *common
+    entrypoint: ["/usr/local/bin/train.sh"]
     volumes: *data-volumes
-    command: >
-      python3 training_runner.py --mode classic --episodes 10 --headless
+    command: ["--mode", "classic", "--episodes", "10", "--headless"]
 

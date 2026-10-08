@@ -71,7 +71,8 @@ RUN . /opt/ros/jazzy/setup.sh \
 # given command (default: an interactive bash shell).
 # ─────────────────────────────────────────────────────────────────────────────
 COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
-RUN chmod +x /usr/local/bin/entrypoint.sh
+COPY docker/train.sh /usr/local/bin/train.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/train.sh
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 CMD ["bash"]

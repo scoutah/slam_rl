@@ -21,17 +21,19 @@ University project, inherited from a previous team; README is in German.
 
 ```bash
 colcon build && source install/setup.bash          # re-source after every build
-ros2 launch tb3_slam sim_slam.launch.py exploration_mode:=classic   # or :=rl, headless:=true
-python3 training_runner.py --mode classic --episodes 20 --headless --randomize-worlds
+ros2 launch tb3_slam sim_slam.launch.py exploration_mode:=classic   # or :=rl, headless:=true, world_size:=12
+python3 training_runner.py --mode classic --episodes 20 --headless --randomize-worlds --world-size 12
 python3 training_runner.py --world worlds/<id>.sdf --episodes 5     # reuse a saved world
 colcon test --packages-select tb3_slam && colcon test-result --verbose
 pkill -9 -f gz                                        # when Gazebo survives Ctrl+C
-python3 tools/check_world_connectivity.py            # offline world-generator check (no ROS)
+python3 tools/check_world_connectivity.py           # offline generator check, both sizes (no ROS)
 ```
 
 `training_runner.py` options: `--mode classic|rl`, `--episodes`, `--timeout` (600 s),
-`--threshold` (0.99), `--headless`, `--world PATH`, `--randomize-worlds`
-(otherwise ONE world is reused for all episodes), `--save-worlds` (persist to `worlds/`).
+`--threshold` (0.99), `--headless`, `--world PATH`, `--world-size 8|12` (edge length of
+generated worlds, default 8; not allowed with `--world` alone), `--randomize-worlds` (otherwise ONE world
+is reused for all episodes), `--save-worlds` (persist to `worlds/`). The results CSV has a
+`world_size` column (read from the world's metadata sidecar).
 
 ## Architecture
 
@@ -44,7 +46,8 @@ Three ament_python packages in `src/`:
 | `tb3_reinforced_exploration` | `reinforced_exploration` node (`rl_agent.py`, DQN) |
 
 **Launch sequence** (`src/tb3_slam/launch/sim_slam.launch.py`, timer-based):
-world generated at launch-description time (unless env `SLAM_WORLD_FILE` is set) →
+world generated at launch time in an `OpaqueFunction` (so the `world_size` launch arg is
+resolved; skipped if env `SLAM_WORLD_FILE` is set) →
 gz server (+ GUI unless headless) → spawn robot near the south wall (edge entry,
 scales with world size; written to world metadata by the generator) → 2 s robot_state_publisher
 → 5 s Cartographer (`turtlebot3_cartographer`) → 6 s startup spin (4 s of TwistStamped on
@@ -59,7 +62,7 @@ scales with world size; written to world metadata by the generator) → 2 s robo
 - All topics/frames are **global, single-robot** (`/map`, `/cmd_vel`, `map`→`base_link`).
 
 **Inter-process files in `/tmp`**
-- `/tmp/slam_world_meta.json` – `expected_traversable_cells` (+ spawn), written by
+- `/tmp/slam_world_meta.json` – `expected_traversable_cells` (+ spawn, `world_size`), written by
   `generate_random_world`, read by `coverage_monitor.load_expected_cells()`. The generator
   also writes a sidecar `<world>.meta.json` next to each SDF; the launch file copies that
   sidecar into this file when a saved world is reused via `SLAM_WORLD_FILE`/`--world`.
@@ -103,10 +106,30 @@ failed goals; spins via `/cmd_vel` when idle 15 s.
 
 ## World generator (`tb3_slam/utils.py::generate_random_world`)
 
-5 × 5 m box (`world_size`), 0.15 m walls, recursive BSP with 3–5 splits; each split wall
-gets one door of `MIN_PATH_WIDTH = 1.1 m`; min room span 1.5 m. Split walls may not enter
-a keep-out square of ±0.5 m **around the spawn point** (near the south wall). Also writes
-the metadata file (traversable cells + spawn x/y).
+Square box of edge length `world_size`, 0.15 m walls, house-like recursive BSP. Sizes are
+always edge lengths: "12 m" means 12 × 12 m = 144 m². **Only the study sizes in
+`WORLD_SIZES` (8, 12) are valid** – the generator raises `ValueError` otherwise, and the
+launch file, `training_runner.py` and `check_world_connectivity.py` reject other values.
+Default (`DEFAULT_WORLD_SIZE`) is 8.
+
+- **Stop criterion, not a split count:** a room is split while it is > `MAX_ROOM_AREA`
+  (20 m²) or more elongated than `MAX_ROOM_ASPECT` (2.5); no cut leaves a room
+  < `MIN_ROOM_AREA` (9 m²) or narrower than `MIN_ROOM_SPAN` (2 m). The room count therefore
+  follows the area (≈ 5 rooms on 8 × 8 m, ≈ 11 on 12 × 12 m, ~13 m² each).
+- Cuts run across the room's long side at 35–65 % of it (`SPLIT_FRACTION`) – no slivers/strips.
+- Each split wall gets one door of `MIN_PATH_WIDTH = 1.1 m`, either flush with a corner or
+  with ≥ `MIN_DOOR_SIDE_WALL` (0.8 m) wall on both sides; later walls keep that distance
+  from existing doors (no wall stubs, door never narrowed). The room graph is a tree
+  (no loops, no open-plan openings – deliberately out of scope).
+- Split walls may not enter a keep-out square of ±0.5 m **around the spawn point**.
+- Writes the metadata (traversable cells, spawn x/y, `world_size`).
+
+Nothing in Cartographer (`turtlebot3_lds_2d.lua`, unbounded submaps) or Nav2 default params
+(global costmap sized from `/map`, rolling 3 × 3 m local costmap) depends on world size.
+
+**Study sizes (Studienbericht 2): 8 × 8 m (64 m²) and 12 × 12 m (144 m²).** Verified fully
+connected with `check_world_connectivity.py --world-size 8 12` (clearances 0.22–0.40 m).
+The episode timeout for these sizes is decided in #10 / #15 (600 s was tuned for 5 × 5 m).
 
 The spawn is derived from `world_size` by `spawn_pose()` in utils.py (centred in x, just
 inside the south wall) and written to the world metadata. The launch file and
@@ -115,8 +138,7 @@ cannot drift. To move the spawn, change `spawn_pose` / `SPAWN_WALL_MARGIN` only.
 
 ## Known issues (state at start of WS 2026/27)
 
-1. **World size** is hard-coded (5 m) and not parameterised; spawn point is independent.
-2. **Single-robot everything** (no namespaces, one Cartographer, one Nav2, one `/map`).
+1. **Single-robot everything** (no namespaces, one Cartographer, one Nav2, one `/map`).
 
 ## Studienbericht 2 – multi-robot exploration
 
@@ -133,8 +155,8 @@ the research question is out of scope. The project is standalone – no single-r
 > In two-robot exploration of large, room-like worlds, does an RL-based frontier allocator
 > outperform a good classical allocator?
 
-Two methods (classical vs RL), two robots, one or two map sizes (map size is the only
-independent variable besides method), one metric set.
+Two methods (classical vs RL), two robots, two map sizes – 8 × 8 m and 12 × 12 m (map size
+is the only independent variable besides method), one metric set.
 
 ### The system
 

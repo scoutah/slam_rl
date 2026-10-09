@@ -85,15 +85,29 @@ geometry, capped at 1.0.
 - **Frontier = FREE cell with an UNCERTAIN (26–74) cardinal neighbour** and no wall within
   a 5×5 window; found by BFS over free cells from the robot. (Not "next to -1" – this is
   intentional for Cartographer's probability map; some docstrings still say "unknown".)
-- Groups: 8-connected clusters. Goal per group: nearest valid FREE cell to the centroid,
-  ≥ 15 cells (0.75 m) from the robot (`MIN_GOAL_GRID_DIST`) to avoid instant "success".
+- Groups: 8-connected clusters. Goal per group: nearest cell to the centroid in the
+  robot's footprint-safe, cardinal-connected FREE region, ≥ 15 cells (0.75 m)
+  from the robot (`MIN_GOAL_GRID_DIST`) to avoid instant "success". Clearance is
+  `GOAL_CLEARANCE_M` (0.22 m, rounded up to cells; conservative square), matching
+  Nav2's robot radius rather than treating its whole inflation layer as lethal.
+  FREE cells within the robot's current footprint allow it to leave an incompletely
+  mapped start; the target itself always has full clearance. Missing/non-FREE robot
+  poses produce no goals. Narrow corridors produce a reachable approach target on
+  the robot's side; duplicate approach targets share their frontier group sizes.
 - `grid_to_world` uses a **0.4999** offset on purpose (Nav2 rounding) – don't "fix" to 0.5.
 
 ### Classic explorer (`frontier_explorer.py`)
 
-Ranks all fresh centroids by Nav2 plan length (Euclidean fallback if the planner
-isn't up or ranking takes > 8 s), goes to the nearest. `_tried` set blacklists failed goals
-until a goal succeeds with real motion (≥ 0.2 m). Goals cancelled after 45 s.
+Ranks all fresh centroids by confirmed Nav2 plan length and goes to the nearest.
+If the planner isn't up, waits for the next map; after 8 s of ranking, uses only
+confirmed paths (no Euclidean fallback to unverified goals).
+The queued world goal is rechecked against footprint-safe reachability in the latest
+map immediately before dispatch, preserving its world position across origin shifts.
+`_tried` blacklists failed goals until a goal succeeds with real motion (≥ 0.2 m).
+An independent timer
+cancels a goal after 8 s without 0.1 m of translation; moving goals retain the 45 s
+overall timeout. Generation IDs ignore delayed ranking/navigation responses after
+timeouts, so an old cancellation cannot clear a new goal. See issue #21.
 
 ### RL explorer (`rl_agent.py`)
 

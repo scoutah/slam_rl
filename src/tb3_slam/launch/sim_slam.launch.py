@@ -1,4 +1,5 @@
 import os
+import shlex
 import sys
 
 from ament_index_python import get_package_share_directory
@@ -90,7 +91,7 @@ def generate_launch_description():
                 os.path.join(ros_gz_sim, 'launch', 'gz_sim.launch.py')
             ),
             launch_arguments={
-                'gz_args': ['-r -s -v2 ', world_file],
+                'gz_args': ['-r -s -v2 ', shlex.quote(world_file)],
                 'on_exit_shutdown': 'true',
             }.items(),
         )

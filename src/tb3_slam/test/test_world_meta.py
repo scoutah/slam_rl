@@ -1,5 +1,6 @@
 """Tests for per-world metadata sidecars (coverage denominator reuse)."""
 import json
+import math
 import random
 import re
 from pathlib import Path
@@ -16,13 +17,23 @@ def test_world_meta_path_is_sidecar():
 
 def test_write_world_meta_roundtrip(tmp_path):
     meta = tmp_path / 'w.meta.json'
-    write_world_meta(meta, expected_traversable_cells=1234, spawn_x=0.0, spawn_y=-1.5,
-                     world_size=8.0)
+    spawns = [(-0.5, -1.5), (0.5, -1.5)]
+    write_world_meta(meta, expected_traversable_cells=1234, spawns=spawns, world_size=8.0)
     data = json.loads(meta.read_text())
     assert data['expected_traversable_cells'] == 1234
-    assert data['spawn_x'] == 0.0
-    assert data['spawn_y'] == -1.5
     assert data['world_size'] == 8.0
+    assert utils.load_spawns(meta) == spawns
+
+
+def test_load_spawns_fallbacks(tmp_path):
+    # Missing file -> default world geometry.
+    assert utils.load_spawns(tmp_path / 'missing.json') == utils.spawn_poses(
+        utils.DEFAULT_WORLD_SIZE)
+    # Legacy single-robot sidecar -> geometry of its recorded world size.
+    legacy = tmp_path / 'legacy.meta.json'
+    legacy.write_text(json.dumps({'expected_traversable_cells': 1, 'spawn_x': 0.0,
+                                  'spawn_y': -5.0, 'world_size': 12.0}))
+    assert utils.load_spawns(legacy) == utils.spawn_poses(12.0)
 
 
 def test_generate_world_writes_sidecar(tmp_path, monkeypatch):
@@ -55,9 +66,59 @@ def test_generate_world_of_given_size(tmp_path, monkeypatch):
 
     data = json.loads(world_meta_path(str(large)).read_text())
     assert data['world_size'] == 12.0
-    # Spawn stays just inside the south wall of the larger world.
-    assert (data['spawn_x'], data['spawn_y']) == utils.spawn_pose(12.0, utils.WALL_THICKNESS)
-    assert data['spawn_y'] < -5.0
+    # Spawns stay just inside the south wall of the larger world.
+    spawns = utils.load_spawns(world_meta_path(str(large)))
+    assert spawns == utils.spawn_poses(12.0)
+    assert all(y < -5.0 for _, y in spawns)
+
+
+@pytest.mark.parametrize('world_size', utils.WORLD_SIZES)
+def test_spawn_poses_two_robots_apart(world_size):
+    spawns = utils.spawn_poses(world_size)
+    assert len(spawns) == utils.NUM_ROBOTS == 2
+    (x1, y1), (x2, y2) = spawns
+    # Side by side at the same entry, mirrored around x = 0.
+    assert y1 == y2 and x1 == -x2
+    assert math.dist(spawns[0], spawns[1]) == pytest.approx(utils.SPAWN_SEPARATION)
+    # Clearance discs of 0.4 m (largest checked robot clearance) do not overlap.
+    assert utils.SPAWN_SEPARATION >= 2 * 0.4
+    # Inside the outer walls with the wall margin on every side.
+    inner = world_size / 2.0 - utils.WALL_THICKNESS / 2.0 - utils.SPAWN_WALL_MARGIN
+    assert all(abs(x) <= inner and abs(y) <= inner + 1e-9 for x, y in spawns)
+
+
+def _wall_boxes(sdf: Path) -> list[tuple[str, float, float, float, float]]:
+    """(name, x, y, size_x, size_y) of every wall model in a generated SDF."""
+    pattern = r'<model name="([^"]+)">.*?<pose>([^<]+)</pose>.*?<size>([^<]+)</size>'
+    boxes = []
+    for name, pose, size in re.findall(pattern, sdf.read_text(), re.S):
+        x, y = map(float, pose.split()[:2])
+        sx, sy = map(float, size.split()[:2])
+        boxes.append((name, x, y, sx, sy))
+    return boxes
+
+
+@pytest.mark.parametrize('world_size', utils.WORLD_SIZES)
+def test_split_walls_keep_out_of_both_spawns(tmp_path, monkeypatch, world_size):
+    # No interior wall enters the keep-out box spanning both spawns, so both
+    # robots are collision-free and no wall separates them.
+    monkeypatch.setattr(utils, 'WORLD_META_FILE', tmp_path / 'shared_meta.json')
+    spawns = utils.spawn_poses(world_size)
+    ko = utils.SPAWN_KEEP_OUT
+    ko_xmin = min(x for x, _ in spawns) - ko
+    ko_xmax = max(x for x, _ in spawns) + ko
+    ko_ymin = min(y for _, y in spawns) - ko
+    ko_ymax = max(y for _, y in spawns) + ko
+    random.seed(2)
+    for i in range(30):
+        world = tmp_path / f'w{i}.sdf'
+        assert utils.generate_random_world(str(world), world_size)[0]
+        assert utils.load_spawns(world_meta_path(str(world))) == spawns
+        for name, x, y, sx, sy in _wall_boxes(world):
+            if not name.startswith('split_'):
+                continue
+            assert (x + sx / 2 <= ko_xmin or x - sx / 2 >= ko_xmax
+                    or y + sy / 2 <= ko_ymin or y - sy / 2 >= ko_ymax), name
 
 
 @pytest.mark.parametrize('world_size', [5.0, 10.0, 0.0])
@@ -74,13 +135,15 @@ def _split_walls(sdf: Path) -> list[tuple[float, float]]:
     return [tuple(map(float, m.split()[:2])) for m in models]
 
 
-@pytest.mark.parametrize('world_size, min_rooms, max_rooms', [(8.0, 3, 7), (12.0, 7, 15)])
+@pytest.mark.parametrize('world_size, min_rooms, max_rooms', [(8.0, 5, 10), (12.0, 13, 24)])
 def test_room_count_follows_area(tmp_path, monkeypatch, world_size, min_rooms, max_rooms):
     # Rooms are split until house-sized (MIN_ROOM_AREA..MAX_ROOM_AREA), so the
     # room count is roughly area / mean room size, not a fixed split count.
+    # 200 worlds: rare failures (e.g. a world left unsplit because the spawn
+    # keep-out blocks every cut on the long axis) only show up in larger samples.
     monkeypatch.setattr(utils, 'WORLD_META_FILE', tmp_path / 'shared_meta.json')
     random.seed(0)
-    for i in range(20):
+    for i in range(200):
         world = tmp_path / f'w{i}.sdf'
         assert utils.generate_random_world(str(world), world_size)[0]
         rooms = len(set(re.findall(r'name="split_(\d+)_', world.read_text()))) + 1
@@ -97,3 +160,28 @@ def test_no_short_wall_stubs(tmp_path, monkeypatch):
         assert utils.generate_random_world(str(world), 12.0)[0]
         for sx, sy in _split_walls(world):
             assert max(sx, sy) >= utils.MIN_DOOR_SIDE_WALL
+
+
+@pytest.mark.parametrize('world_size', utils.WORLD_SIZES)
+def test_spawns_share_a_room(tmp_path, monkeypatch, world_size):
+    # No cut may pass between the spawns, even where the keep-out box would
+    # allow it (disabled here), so both robots always start in the same room.
+    monkeypatch.setattr(utils, 'WORLD_META_FILE', tmp_path / 'shared_meta.json')
+    monkeypatch.setattr(utils, 'SPAWN_KEEP_OUT', -1.0)
+    (x1, _), (x2, _) = utils.spawn_poses(world_size)
+    half = world_size / 2.0
+    random.seed(3)
+    for i in range(30):
+        world = tmp_path / f'w{i}.sdf'
+        assert utils.generate_random_world(str(world), world_size)[0]
+        cuts: dict[str, list[tuple[float, float, float, float]]] = {}
+        for name, x, y, sx, sy in _wall_boxes(world):
+            if name.startswith('split_') and '_v_' in name:
+                cuts.setdefault(name.rsplit('_', 1)[0], []).append((x, y, sx, sy))
+        for name, segs in cuts.items():
+            cut_x = segs[0][0]
+            # Rooms are >= MIN_ROOM_SPAN deep, so a cut reaching below this
+            # line splits the room at the south wall, where the robots start.
+            bottom = min(y - sy / 2 for _, y, _, sy in segs)
+            in_spawn_room = bottom < -half + utils.MIN_ROOM_SPAN
+            assert not (in_spawn_room and min(x1, x2) < cut_x < max(x1, x2)), name

@@ -21,6 +21,16 @@ MIN_PATH_WIDTH: float = 1.1
 # footprint plus Nav2 inflation so the spawn is never inside an (inflated) wall.
 SPAWN_WALL_MARGIN: float = 0.7
 
+# Two robots start side by side at the same entry (mirrored around x = 0),
+# both facing into the world. Centre distance: the Burger footprint is
+# ~0.21 m wide, so 1.0 m keeps both footprints (plus a 0.4 m clearance
+# each) apart, and the other robot stays outside the Nav2 inflation radius.
+NUM_ROBOTS: int = 2
+SPAWN_SEPARATION: float = 1.0
+# Robot-scale clearance around each spawn that split walls may not enter,
+# independent of world size.
+SPAWN_KEEP_OUT: float = 0.5
+
 # Edge length of the square world in metres. Only the two study sizes are
 # valid (8 x 8 m and 12 x 12 m), selected per world via the world_size
 # argument (launch arg / training_runner --world-size).
@@ -29,7 +39,7 @@ DEFAULT_WORLD_SIZE: float = WORLD_SIZES[0]
 WALL_THICKNESS: float = 0.15
 
 # House-like room geometry for the BSP generator. Rooms are split until they
-# are at most MAX_ROOM_AREA (bedroom .. living room); a cut never leaves a room
+# are at most MAX_ROOM_AREA (small room size); a cut never leaves a room
 # smaller than MIN_ROOM_AREA or narrower than MIN_ROOM_SPAN.
 MIN_ROOM_AREA: float = 5.0    # m²
 MAX_ROOM_AREA: float = 9.0   # m²
@@ -48,7 +58,7 @@ def world_meta_path(world_file: str) -> Path:
     """Sidecar metadata path for a given world SDF.
 
     Metadata is stored next to the world (``<world>.meta.json``) so a saved
-    world carries its own coverage denominator and spawn pose, instead of
+    world carries its own coverage denominator and spawn poses, instead of
     relying on the shared /tmp file which only describes the *last generated*
     world.
     """
@@ -56,26 +66,55 @@ def world_meta_path(world_file: str) -> Path:
 
 
 def write_world_meta(path: Path, expected_traversable_cells: int,
-                     spawn_x: float, spawn_y: float, world_size: float) -> None:
-    """Write world metadata (traversable cells, spawn pose, size) as JSON."""
+                     spawns: List[Tuple[float, float]], world_size: float) -> None:
+    """Write world metadata (traversable cells, spawn poses, size) as JSON.
+
+    spawns holds one (x, y) per robot, in robot order.
+    """
     path.write_text(
         json.dumps({
             'expected_traversable_cells': expected_traversable_cells,
-            'spawn_x': spawn_x,
-            'spawn_y': spawn_y,
+            'spawns': [[x, y] for x, y in spawns],
             'world_size': world_size,
         })
     )
 
 
-def spawn_pose(world_size: float, wall_thickness: float) -> Tuple[float, float]:
-    """Robot spawn (x, y): centred in x, just inside the south wall.
+def spawn_poses(world_size: float,
+                wall_thickness: float = WALL_THICKNESS) -> List[Tuple[float, float]]:
+    """Robot spawns [(x, y), ...]: side by side, just inside the south wall.
 
-    Derived from world_size so it stays at the edge when worlds grow larger.
+    One pose per robot (NUM_ROBOTS), SPAWN_SEPARATION apart and centred in x.
+    Derived from world_size so they stay at the edge when worlds grow larger.
     """
     half = world_size / 2.0
     y = -half + wall_thickness / 2.0 + SPAWN_WALL_MARGIN
-    return (0.0, y)
+    offset = (NUM_ROBOTS - 1) / 2.0
+    return [((i - offset) * SPAWN_SEPARATION, y) for i in range(NUM_ROBOTS)]
+
+
+def load_spawns(meta_path: Path) -> List[Tuple[float, float]]:
+    """Robot spawns [(x, y), ...] from a world metadata file.
+
+    Single source for the launch file and tools, so they place the robots
+    exactly where the generator kept the space free. Falls back to the
+    default geometry (of the recorded world_size, if any) when the file is
+    missing or predates multi-robot spawns.
+    """
+    try:
+        meta = json.loads(Path(meta_path).read_text())
+    except (OSError, ValueError):
+        return spawn_poses(DEFAULT_WORLD_SIZE)
+    try:
+        spawns = [(float(x), float(y)) for x, y in meta['spawns']]
+        if len(spawns) == NUM_ROBOTS:
+            return spawns
+    except (KeyError, TypeError, ValueError):
+        pass
+    try:
+        return spawn_poses(float(meta['world_size']))
+    except (KeyError, TypeError, ValueError):
+        return spawn_poses(DEFAULT_WORLD_SIZE)
 
 
 def check_world_size(world_size: float) -> float:
@@ -93,7 +132,7 @@ def generate_random_world(
     Generates a closed square Gazebo SDF world (world_size x world_size m)
     with house-like interior rooms; the number of rooms follows the area.
     Writes the world to file_path and writes expected traversable cell count
-    (plus spawn pose) both to a sidecar next to the world (``<world>.meta.json``,
+    (plus spawn poses) both to a sidecar next to the world (``<world>.meta.json``,
     so a saved world can be reused via --world with the correct coverage
     denominator) and to the shared WORLD_META_FILE that running nodes read.
 
@@ -109,13 +148,19 @@ def generate_random_world(
     try:
         wall_height = 1.2
         wall_thickness = WALL_THICKNESS
-        # Robot-scale clearance around the spawn, independent of world size.
-        keep_out_half = 0.5
 
         half = world_size / 2.0
 
-        # Robot spawns near the south wall (edge entry), not the centre.
-        spawn_x, spawn_y = spawn_pose(world_size, wall_thickness)
+        # Robots spawn side by side near the south wall (edge entry).
+        spawns = spawn_poses(world_size, wall_thickness)
+        # One keep-out box around all spawns (not one square each), so no
+        # wall can end up between the robots either.
+        keep_out = (
+            min(x for x, _ in spawns) - SPAWN_KEEP_OUT,
+            max(x for x, _ in spawns) + SPAWN_KEEP_OUT,
+            min(y for _, y in spawns) - SPAWN_KEEP_OUT,
+            max(y for _, y in spawns) + SPAWN_KEEP_OUT,
+        )
 
         # Track footprint area of every wall to derive free-space estimate
         _wall_areas: List[float] = []
@@ -162,12 +207,26 @@ def generate_random_world(
             min_y = center_y - half_y
             max_y = center_y + half_y
 
+            ko_xmin, ko_xmax, ko_ymin, ko_ymax = keep_out
             return not (
-                max_x <= spawn_x - keep_out_half
-                or min_x >= spawn_x + keep_out_half
-                or max_y <= spawn_y - keep_out_half
-                or min_y >= spawn_y + keep_out_half
+                max_x <= ko_xmin
+                or min_x >= ko_xmax
+                or max_y <= ko_ymin
+                or min_y >= ko_ymax
             )
+
+        def separates_spawns(room: Tuple[float, float, float, float],
+                             vertical: bool, cut: float) -> bool:
+            """True if cutting room at cut would put the robots in different rooms.
+
+            Guarantees a shared start room by design. The keep-out box alone
+            only does so incidentally: a door gap (MIN_PATH_WIDTH) could
+            otherwise line up with the box and let a separating wall pass.
+            """
+            xmin, xmax, ymin, ymax = room
+            coords = [x if vertical else y for x, y in spawns
+                      if xmin < x < xmax and ymin < y < ymax]
+            return any(c < cut for c in coords) and any(c > cut for c in coords)
 
         # --------------------------------------------------
         # 1. Outer boundary (closed box room)
@@ -186,7 +245,8 @@ def generate_random_world(
         # MAX_ROOM_ASPECT (stop criterion instead of a fixed split count, so
         # the room count follows the world area). Each cut runs across the
         # room's long axis near its middle (kd-tree style), which avoids
-        # slivers and corridor-like strips. Every split wall gets one door, so
+        # slivers and corridor-like strips; only if that is impossible is the
+        # other axis tried. Every split wall gets one door, so
         # all rooms stay connected. Room bounds are wall centre lines.
         door_width = MIN_PATH_WIDTH
 
@@ -245,60 +305,67 @@ def generate_random_world(
                 rooms.append((xmin, xmax, ymin, ymax))
                 continue
 
-            # Cut across the long axis: a vertical wall splits the x span.
-            vertical = (xmax - xmin) >= (ymax - ymin)
-            lo, hi = (xmin, xmax) if vertical else (ymin, ymax)
-            along_lo, along_hi = (ymin, ymax) if vertical else (xmin, xmax)
-            span, along = hi - lo, along_hi - along_lo
-
+            # Cut across the long axis: a vertical wall splits the x span. If
+            # no valid cut exists there (e.g. the middle of a square world is
+            # taken by the spawn keep-out), try the other axis before giving up.
+            long_vertical = (xmax - xmin) >= (ymax - ymin)
             split_success = False
-            for _ in range(40):
-                cut = lo + span * random.uniform(*SPLIT_FRACTION)
-                side = min(cut - lo, hi - cut)
-                if side < MIN_ROOM_SPAN or side * along < MIN_ROOM_AREA:
-                    continue
+            for vertical in (long_vertical, not long_vertical):
+                lo, hi = (xmin, xmax) if vertical else (ymin, ymax)
+                along_lo, along_hi = (ymin, ymax) if vertical else (xmin, xmax)
+                span, along = hi - lo, along_hi - along_lo
 
-                # Door is placed on the free span between the bounding walls.
-                d0, d1 = door_interval(along_lo + wall_thickness / 2.0,
-                                       along_hi - wall_thickness / 2.0)
-                segments = []
-                for s, e in ((along_lo, d0), (d1, along_hi)):
-                    # A flush door leaves only a piece hidden inside the
-                    # perpendicular wall – skip it.
-                    if e - s <= wall_thickness / 2.0 + 1e-6:
+                for _ in range(40):
+                    cut = lo + span * random.uniform(*SPLIT_FRACTION)
+                    side = min(cut - lo, hi - cut)
+                    if side < MIN_ROOM_SPAN or side * along < MIN_ROOM_AREA:
                         continue
+                    if separates_spawns((xmin, xmax, ymin, ymax), vertical, cut):
+                        continue
+
+                    # Door is placed on the free span between the bounding walls.
+                    d0, d1 = door_interval(along_lo + wall_thickness / 2.0,
+                                           along_hi - wall_thickness / 2.0)
+                    segments = []
+                    for s, e in ((along_lo, d0), (d1, along_hi)):
+                        # A flush door leaves only a piece hidden inside the
+                        # perpendicular wall – skip it.
+                        if e - s <= wall_thickness / 2.0 + 1e-6:
+                            continue
+                        if vertical:
+                            segments.append((cut, (s + e) / 2.0, wall_thickness, e - s))
+                        else:
+                            segments.append(((s + e) / 2.0, cut, e - s, wall_thickness))
+
+                    if any(intersects_keep_out(x, y, sx, sy) for x, y, sx, sy in segments):
+                        continue
+                    if blocks_existing_door(segments):
+                        continue
+
+                    axis = 'v' if vertical else 'h'
+                    for seg_idx, (x, y, sx, sy) in enumerate(segments):
+                        name = f"split_{split_count}_{axis}_{seg_idx}"
+                        walls.append(create_wall(name, x, y, sx, sy))
+
+                    m = MIN_DOOR_SIDE_WALL
                     if vertical:
-                        segments.append((cut, (s + e) / 2.0, wall_thickness, e - s))
+                        doors.append((cut - wall_thickness / 2.0, cut + wall_thickness / 2.0,
+                                      d0 - m, d1 + m))
+                        pending.append((xmin, cut, ymin, ymax))
+                        pending.append((cut, xmax, ymin, ymax))
                     else:
-                        segments.append(((s + e) / 2.0, cut, e - s, wall_thickness))
-
-                if any(intersects_keep_out(x, y, sx, sy) for x, y, sx, sy in segments):
-                    continue
-                if blocks_existing_door(segments):
-                    continue
-
-                axis = 'v' if vertical else 'h'
-                for seg_idx, (x, y, sx, sy) in enumerate(segments):
-                    name = f"split_{split_count}_{axis}_{seg_idx}"
-                    walls.append(create_wall(name, x, y, sx, sy))
-
-                m = MIN_DOOR_SIDE_WALL
-                if vertical:
-                    doors.append((cut - wall_thickness / 2.0, cut + wall_thickness / 2.0,
-                                  d0 - m, d1 + m))
-                    pending.append((xmin, cut, ymin, ymax))
-                    pending.append((cut, xmax, ymin, ymax))
-                else:
-                    doors.append((d0 - m, d1 + m,
-                                  cut - wall_thickness / 2.0, cut + wall_thickness / 2.0))
-                    pending.append((xmin, xmax, ymin, cut))
-                    pending.append((xmin, xmax, cut, ymax))
-                split_count += 1
-                split_success = True
-                break
+                        doors.append((d0 - m, d1 + m,
+                                      cut - wall_thickness / 2.0, cut + wall_thickness / 2.0))
+                        pending.append((xmin, xmax, ymin, cut))
+                        pending.append((xmin, xmax, cut, ymax))
+                    split_count += 1
+                    split_success = True
+                    break
+                if split_success:
+                    break
 
             if not split_success:
-                # Cannot be split validly (spawn keep-out, door clash or too
+                # Cannot be split validly (spawn keep-out or separation, door clash or too
                 # small to halve) – keep it as one larger room.
                 rooms.append((xmin, xmax, ymin, ymax))
 
@@ -384,11 +451,10 @@ def generate_random_world(
         # shared /tmp file that running nodes read by default.
         write_world_meta(
             world_meta_path(file_path),
-            expected_traversable_cells, spawn_x, spawn_y, world_size,
+            expected_traversable_cells, spawns, world_size,
         )
         write_world_meta(
-            WORLD_META_FILE, expected_traversable_cells, spawn_x, spawn_y,
-            world_size,
+            WORLD_META_FILE, expected_traversable_cells, spawns, world_size,
         )
 
         return True, expected_traversable_cells

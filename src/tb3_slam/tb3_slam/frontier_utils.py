@@ -1,9 +1,9 @@
 """Shared frontier detection utilities used by all exploration strategies."""
-import math
 from collections import deque
+import math
 
-import numpy as np
 from nav_msgs.msg import OccupancyGrid
+import numpy as np
 
 # Occupancy value ranges
 # NOTE: WALL_MIN lowered from 90 → 75 as an experiment. Cartographer appears to
@@ -159,83 +159,85 @@ def find_groups(frontiers: list[tuple[int, int]]) -> list[list[tuple[int, int]]]
 # between Cartographer updates desynchronising our world frame from Nav2's.
 # 15 cells (0.75m) is safely beyond any realistic drift + tolerance.
 MIN_GOAL_GRID_DIST = 15
+# Nav2's default robot_radius, not its entire (non-lethal) inflation layer.
+GOAL_CLEARANCE_M = 0.22
+
+
+def reachable_goal_cells(
+    grid: np.ndarray,
+    robot_grid_pos: tuple[int, int] | None,
+    clearance_cells: int = 5,
+) -> np.ndarray:
+    """Return cells reachable over FREE space with footprint clearance.
+
+    Erode known-free space by a conservative square before the cardinal BFS.
+    This removes narrow corridors as well as unsafe goals. Unknown/uncertain
+    cells and the map boundary are obstacles. A FREE robot may leave its
+    currently occupied footprint over FREE cells while that neighbourhood is
+    still being mapped; every returned goal lies in the eroded region.
+    """
+    rows, cols = grid.shape
+    reachable = np.zeros(grid.shape, dtype=bool)
+    if robot_grid_pos is None or rows == 0 or cols == 0:
+        return reachable
+    sr, sc = robot_grid_pos
+    if not (0 <= sr < rows and 0 <= sc < cols):
+        return reachable
+    free = (grid >= 0) & (grid <= FREE_MAX)
+    if not free[sr, sc]:
+        return reachable
+    radius = max(0, clearance_cells)
+    padded = np.pad(free, radius, constant_values=False)
+    safe = free.copy()
+    for dr in range(2 * radius + 1):
+        for dc in range(2 * radius + 1):
+            safe &= padded[dr:dr + rows, dc:dc + cols]
+    traversable = safe.copy()
+    r0, r1 = max(0, sr - radius), min(rows, sr + radius + 1)
+    c0, c1 = max(0, sc - radius), min(cols, sc + radius + 1)
+    traversable[r0:r1, c0:c1] |= free[r0:r1, c0:c1]
+    reachable[sr, sc] = True
+    queue = deque([(sr, sc)])
+    while queue:
+        r, c = queue.popleft()
+        for nr, nc in ((r - 1, c), (r + 1, c), (r, c - 1), (r, c + 1)):
+            if (0 <= nr < rows and 0 <= nc < cols
+                    and traversable[nr, nc] and not reachable[nr, nc]):
+                reachable[nr, nc] = True
+                queue.append((nr, nc))
+    return reachable & safe
 
 
 def find_centroid(
     group: list[tuple[int, int]],
     grid: np.ndarray,
     robot_grid_pos: tuple[int, int] | None = None,
+    *,
+    reachable_cells: np.ndarray | None = None,
 ) -> tuple[int, int] | None:
-    """Return a navigable FREE cell near the geometric centroid of a frontier group.
+    """Return a reachable approach goal closest to the group's centroid.
 
-    The frontier cells are UNKNOWN; the goal must be a FREE cell Nav2 can plan
-    to. Walls in this SLAM setup can live in the UNCERTAIN range, so a naive
-    cardinal-neighbour search often fails when a frontier group is separated
-    from FREE space by a thin band of UNCERTAIN cells. We BFS outward from the
-    frontier cells through any non-wall cell (UNKNOWN, UNCERTAIN) until we hit
-    a FREE cell, picking the one closest to the group centroid.
-
-    When ``robot_grid_pos`` is given, FREE cells within ``MIN_GOAL_GRID_DIST``
-    of the robot are rejected so the commanded goal actually produces motion
-    (otherwise Nav2 declares instant success inside its xy_goal_tolerance and
-    the robot stays put, re-triggering the same frontier indefinitely).
+    Search only the robot's connected footprint-safe FREE region, never through
+    unknown or uncertain cells. For a frontier beyond a narrow corridor this
+    selects a safe approach on the robot's side. Goals retain the minimum
+    motion distance. The pipeline supplies its mask once per map; direct calls
+    use five cells of clearance (0.25 m at the study resolution of 0.05 m).
     """
-    if not group:
+    if not group or robot_grid_pos is None:
         return None
-
-    rows, cols = grid.shape
     n = len(group)
     cr = sum(r for r, _ in group) // n
     cc = sum(c for _, c in group) // n
-
-    MARGIN = 2
-    min_dist_sq = MIN_GOAL_GRID_DIST * MIN_GOAL_GRID_DIST
-
-    def _too_close_to_robot(r: int, c: int) -> bool:
-        if robot_grid_pos is None:
-            return False
-        dr_ = r - robot_grid_pos[0]
-        dc_ = c - robot_grid_pos[1]
-        return dr_ * dr_ + dc_ * dc_ < min_dist_sq
-
-    def _is_valid_free(r: int, c: int) -> bool:
-        return (MARGIN <= r < rows - MARGIN
-                and MARGIN <= c < cols - MARGIN
-                and 0 <= grid[r, c] <= FREE_MAX
-                and not _too_close_to_robot(r, c))
-
-    if _is_valid_free(cr, cc):
-        return (cr, cc)
-
-    visited: set[tuple[int, int]] = set(group)
-    queue: deque[tuple[int, int]] = deque(group)
-    best: tuple[int, int] | None = None
-    best_dist = float('inf')
-    expansions = 0
-    MAX_EXPANSIONS = rows * cols
-
-    while queue and expansions < MAX_EXPANSIONS:
-        r, c = queue.popleft()
-        expansions += 1
-        for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
-            nr, nc = r + dr, c + dc
-            if not (0 <= nr < rows and 0 <= nc < cols):
-                continue
-            if (nr, nc) in visited:
-                continue
-            visited.add((nr, nc))
-            if _is_valid_free(nr, nc):
-                dist = math.hypot(nr - cr, nc - cc)
-                if dist < best_dist:
-                    best_dist = dist
-                    best = (nr, nc)
-                continue
-            v = grid[nr, nc]
-            if v >= WALL_MIN:
-                continue
-            queue.append((nr, nc))
-
-    return best
+    if reachable_cells is None:
+        reachable_cells = reachable_goal_cells(grid, robot_grid_pos)
+    candidates = np.argwhere(reachable_cells)
+    distance_from_robot = np.sum((candidates - robot_grid_pos) ** 2, axis=1)
+    candidates = candidates[distance_from_robot >= MIN_GOAL_GRID_DIST ** 2]
+    if len(candidates) == 0:
+        return None
+    distance_to_frontier = np.sum((candidates - (cr, cc)) ** 2, axis=1)
+    row, col = candidates[np.argmin(distance_to_frontier)]
+    return int(row), int(col)
 
 
 def centroids_from_map(
@@ -282,15 +284,24 @@ def centroids_from_map_debug(
 
     frontiers = find_frontiers(grid, free_seeds=free_seeds, robot_grid_pos=robot_grid_pos)
     groups = find_groups(frontiers)
+    clearance = (
+        math.ceil(GOAL_CLEARANCE_M / msg.info.resolution) if msg.info.resolution > 0 else 5
+    )
+    reachable = reachable_goal_cells(grid, robot_grid_pos, clearance)
 
     centroids: list[tuple[int, int]] = []
     centroid_group_sizes: list[int] = []
     dropped_samples: list[dict] = []
     for group in groups:
-        centroid = find_centroid(group, grid, robot_grid_pos=robot_grid_pos)
+        centroid = find_centroid(
+            group, grid, robot_grid_pos=robot_grid_pos, reachable_cells=reachable,
+        )
         if centroid is not None:
-            centroids.append(centroid)
-            centroid_group_sizes.append(len(group))
+            if centroid in centroids:
+                centroid_group_sizes[centroids.index(centroid)] += len(group)
+            else:
+                centroids.append(centroid)
+                centroid_group_sizes.append(len(group))
         elif len(dropped_samples) < 3:
             n = len(group)
             cr = sum(r for r, _ in group) // n

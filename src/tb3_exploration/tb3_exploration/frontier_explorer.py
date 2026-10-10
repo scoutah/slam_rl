@@ -6,26 +6,32 @@ until the coverage threshold is reached.
 import math
 from pathlib import Path
 
-import rclpy
-import tf_transformations
-from tf2_ros import Buffer, TransformListener
 from action_msgs.msg import GoalStatus
 from geometry_msgs.msg import PoseStamped
-from nav_msgs.msg import OccupancyGrid
 from nav2_msgs.action import ComputePathToPose, NavigateToPose
+from nav_msgs.msg import OccupancyGrid
+import numpy as np
+import rclpy
 from rclpy.action import ActionClient
 from rclpy.action.client import ClientGoalHandle
 from rclpy.node import Node
 from rclpy.task import Future
-from visualization_msgs.msg import MarkerArray
-
 from tb3_slam.coverage_monitor import (
-    DEFAULT_COVERAGE_THRESHOLD,
     check_coverage,
+    DEFAULT_COVERAGE_THRESHOLD,
     load_expected_cells,
 )
-from tb3_slam.frontier_utils import centroids_from_map_debug, grid_to_world, world_to_grid
+from tb3_slam.frontier_utils import (
+    centroids_from_map_debug,
+    GOAL_CLEARANCE_M,
+    grid_to_world,
+    reachable_goal_cells,
+    world_to_grid,
+)
 from tb3_slam.frontier_viz import build_frontier_markers
+from tf2_ros import Buffer, TransformListener
+import tf_transformations
+from visualization_msgs.msg import MarkerArray
 
 
 class FrontierExplorer(Node):
@@ -44,6 +50,7 @@ class FrontierExplorer(Node):
         # Navigation state
         self._goal_active = False
         self._current_map: OccupancyGrid | None = None
+        self._latest_map: OccupancyGrid | None = None
         self._centroid_queue: list[tuple[int, int]] = []
         self._current_target: tuple[int, int] | None = None
         # Centroids that failed in the current round (cleared on success that
@@ -55,6 +62,9 @@ class FrontierExplorer(Node):
         self._goal_dispatch_world: tuple[float, float] | None = None
         self._goal_dispatch_time: float | None = None
         self._goal_handle: ClientGoalHandle | None = None
+        self._goal_generation = 0
+        self._goal_last_progress_time: float | None = None
+        self._goal_last_progress_pos: tuple[float, float] | None = None
         # Meters — if a "SUCCEEDED" goal moved the robot less than this, the
         # goal was likely reached by coincidence/tolerance rather than real
         # navigation; mark it tried to break repeat cycles.
@@ -63,10 +73,14 @@ class FrontierExplorer(Node):
         # Covers infinite recovery loops (spin → wait → backup) that never
         # return SUCCEEDED/ABORTED and would otherwise silence the explorer.
         self._GOAL_TIMEOUT_S = 45.0
+        self._NO_PROGRESS_TIMEOUT_S = 8.0
+        self._PROGRESS_STEP_M = 0.1
 
         expected = load_expected_cells()
         if expected is None:
-            self.get_logger().warning('[coverage] No world metadata – coverage monitoring disabled')
+            self.get_logger().warning(
+                '[coverage] No world metadata – coverage monitoring disabled'
+            )
             self._expected_cells = 0
         else:
             self._expected_cells = expected
@@ -88,6 +102,7 @@ class FrontierExplorer(Node):
         # Euclidean distance. Ranking is async: one ComputePathToPose goal per
         # candidate; when all results are in we sort and dispatch the nearest.
         self._ranking_in_progress = False
+        self._ranking_generation = 0
         self._ranking_map: OccupancyGrid | None = None
         self._ranking_pending: int = 0
         self._ranking_results: list[tuple[tuple[int, int], float]] = []
@@ -95,6 +110,7 @@ class FrontierExplorer(Node):
         self._ranking_start_time: float | None = None
         self._RANKING_TIMEOUT_S = 8.0
         self.create_timer(1.0, self._supervise_ranking)
+        self.create_timer(1.0, self._supervise_active_goal)
 
         self.get_logger().info('FrontierExplorer ready – waiting for /map ...')
 
@@ -105,6 +121,7 @@ class FrontierExplorer(Node):
     def _map_callback(self, msg: OccupancyGrid) -> None:
         if self._coverage_done:
             return
+        self._latest_map = msg
 
         if self._expected_cells > 0:
             coverage, known = check_coverage(msg, self._expected_cells)
@@ -117,7 +134,9 @@ class FrontierExplorer(Node):
         # gated this behind `_goal_active`, the MarkerArray would stop
         # updating the moment the first goal is dispatched.
         robot_pos = self._get_robot_pos()
-        robot_grid_pos = world_to_grid(robot_pos[0], robot_pos[1], msg) if robot_pos is not None else None
+        robot_grid_pos = (
+            world_to_grid(robot_pos[0], robot_pos[1], msg) if robot_pos is not None else None
+        )
         centroids, stats = centroids_from_map_debug(msg, robot_grid_pos=robot_grid_pos)
         self._viz_pub.publish(
             build_frontier_markers(
@@ -131,7 +150,6 @@ class FrontierExplorer(Node):
         )
 
         if self._goal_active:
-            self._supervise_active_goal()
             return
 
         if self._ranking_in_progress:
@@ -198,28 +216,19 @@ class FrontierExplorer(Node):
     ) -> None:
         """Ask Nav2 for a real plan to every fresh centroid, then dispatch nearest.
 
-        If the planner action server isn't up yet we fall back to Euclidean
-        sorting so the robot still moves while Nav2 is initialising.
+        Only confirmed paths may be dispatched; retry on the next map update
+        while Nav2 is initialising.
         """
         if not self._planner_client.server_is_ready():
-            robot = self._get_robot_pos()
-            if robot is not None:
-                fresh.sort(
-                    key=lambda c: math.hypot(
-                        grid_to_world(c, map_msg)[0] - robot[0],
-                        grid_to_world(c, map_msg)[1] - robot[1],
-                    )
-                )
             self.get_logger().warning(
-                '[rank] compute_path_to_pose not ready — using Euclidean fallback',
+                '[rank] compute_path_to_pose not ready — waiting for a verified path',
                 throttle_duration_sec=5.0,
             )
-            self._centroid_queue = fresh
-            self._current_map = map_msg
-            self._try_next_goal()
             return
 
         self._ranking_in_progress = True
+        self._ranking_generation += 1
+        generation = self._ranking_generation
         self._ranking_map = map_msg
         self._ranking_results = []
         self._ranking_pending = len(fresh)
@@ -239,19 +248,25 @@ class FrontierExplorer(Node):
             goal.use_start = False  # let Nav2 use the current robot pose
             future = self._planner_client.send_goal_async(goal)
             future.add_done_callback(
-                lambda f, c=cell: self._on_rank_goal_response(f, c)
+                lambda f, c=cell: self._on_rank_goal_response(f, c, generation)
             )
 
-    def _on_rank_goal_response(self, future: Future, cell: tuple[int, int]) -> None:
+    def _on_rank_goal_response(
+        self, future: Future, cell: tuple[int, int], generation: int,
+    ) -> None:
         handle: ClientGoalHandle = future.result()
+        if generation != self._ranking_generation or not self._ranking_in_progress:
+            if handle.accepted:
+                handle.cancel_goal_async()
+            return
         if not handle.accepted:
-            self._record_rank_result(cell, None)
+            self._record_rank_result(cell, None, generation)
             return
         handle.get_result_async().add_done_callback(
-            lambda f, c=cell: self._on_rank_result(f, c)
+            lambda f, c=cell: self._on_rank_result(f, c, generation)
         )
 
-    def _on_rank_result(self, future: Future, cell: tuple[int, int]) -> None:
+    def _on_rank_result(self, future: Future, cell: tuple[int, int], generation: int) -> None:
         wrapper = future.result()
         status: int = wrapper.status
         length: float | None = None
@@ -264,13 +279,16 @@ class FrontierExplorer(Node):
                     cur = ps.pose.position
                     length += math.hypot(cur.x - prev.x, cur.y - prev.y)
                     prev = cur
-        self._record_rank_result(cell, length)
+        self._record_rank_result(cell, length, generation)
 
     def _record_rank_result(
         self,
         cell: tuple[int, int],
         length: float | None,
+        generation: int,
     ) -> None:
+        if generation != self._ranking_generation or not self._ranking_in_progress:
+            return
         if length is not None:
             self._ranking_results.append((cell, length))
         self._ranking_pending -= 1
@@ -302,11 +320,7 @@ class FrontierExplorer(Node):
         self._try_next_goal()
 
     def _supervise_ranking(self) -> None:
-        """Watchdog: if Nav2 stops responding to ComputePathToPose the ranking
-        would stall forever and the robot would sit idle. After the timeout
-        we salvage whatever results arrived; if none did, fall back to
-        Euclidean order over the original fresh list so something still ships.
-        """
+        """Finish slow rankings using only paths Nav2 actually confirmed."""
         if not self._ranking_in_progress or self._ranking_start_time is None:
             return
         elapsed = self.get_clock().now().nanoseconds * 1e-9 - self._ranking_start_time
@@ -315,22 +329,8 @@ class FrontierExplorer(Node):
         self.get_logger().warning(
             f'[rank] TIMEOUT after {elapsed:.0f}s — '
             f'{len(self._ranking_results)}/{len(self._ranking_fresh)} replies received, '
-            'falling back to Euclidean'
+            'using only confirmed paths'
         )
-        if not self._ranking_results and self._ranking_map is not None:
-            robot = self._get_robot_pos()
-            if robot is not None:
-                map_msg = self._ranking_map
-                self._ranking_results = [
-                    (
-                        cell,
-                        math.hypot(
-                            grid_to_world(cell, map_msg)[0] - robot[0],
-                            grid_to_world(cell, map_msg)[1] - robot[1],
-                        ),
-                    )
-                    for cell in self._ranking_fresh
-                ]
         self._ranking_pending = 0
         self._finish_ranking()
 
@@ -339,7 +339,7 @@ class FrontierExplorer(Node):
     # ------------------------------------------------------------------
 
     def _try_next_goal(self) -> None:
-        """Pop the next centroid and send it to Nav2."""
+        """Recheck queued world goals in the newest map before dispatch."""
         if not self._centroid_queue or self._current_map is None:
             self.get_logger().warning(
                 '[goal] Queue empty – waiting for new frontiers',
@@ -348,17 +348,40 @@ class FrontierExplorer(Node):
             self._goal_active = False
             return
 
-        target = self._centroid_queue.pop(0)
-        self._current_target = target
-        x, y = grid_to_world(target, self._current_map)
         robot = self._get_robot_pos()
-        dist_str = 'n/a'
-        if robot is not None:
-            d = math.hypot(x - robot[0], y - robot[1])
-            dist_str = f'{d:.2f}m'
+        if robot is None:
+            self._centroid_queue.clear()
+            self._current_target = None
+            self._goal_active = False
+            return
+        latest = self._latest_map if self._latest_map is not None else self._current_map
+        grid = np.array(latest.data, dtype=np.int8).reshape(
+            latest.info.height, latest.info.width,
+        )
+        robot_cell = world_to_grid(*robot, latest)
+        clearance = math.ceil(GOAL_CLEARANCE_M / latest.info.resolution)
+        reachable = reachable_goal_cells(grid, robot_cell, clearance)
+        while self._centroid_queue:
+            target = self._centroid_queue.pop(0)
+            # The queue belongs to the ranking snapshot. Keep its world point
+            # even when Cartographer changes the latest map's grid origin.
+            x, y = grid_to_world(target, self._current_map)
+            latest_cell = world_to_grid(x, y, latest)
+            if latest_cell is not None and reachable[latest_cell]:
+                break
+            self.get_logger().info('[goal] Skipping goal no longer reachable in latest map')
+        else:
+            self._current_target = None
+            self._goal_active = False
+            return
+        self._current_target = target
+        d = math.hypot(x - robot[0], y - robot[1])
+        dist_str = f'{d:.2f}m'
         self._goal_dispatch_pos = robot
         self._goal_dispatch_world = (x, y)
         self._goal_dispatch_time = self.get_clock().now().nanoseconds * 1e-9
+        self._goal_last_progress_time = self._goal_dispatch_time
+        self._goal_last_progress_pos = robot
         self.get_logger().info(
             f'[goal] → ({x:.2f}, {y:.2f})  robot=({robot[0]:.2f}, {robot[1]:.2f})  '
             f'dist={dist_str}  ({len(self._centroid_queue)} remaining)'
@@ -386,11 +409,17 @@ class FrontierExplorer(Node):
         goal.pose = pose
 
         self._goal_active = True
+        self._goal_generation += 1
+        generation = self._goal_generation
         future: Future = self._nav_client.send_goal_async(goal)
-        future.add_done_callback(self._on_goal_response)
+        future.add_done_callback(lambda f: self._on_goal_response(f, generation))
 
-    def _on_goal_response(self, future: Future) -> None:
+    def _on_goal_response(self, future: Future, generation: int) -> None:
         handle: ClientGoalHandle = future.result()
+        if generation != self._goal_generation:
+            if handle.accepted:
+                handle.cancel_goal_async()
+            return
         if not handle.accepted:
             self.get_logger().warning('[goal] REJECTED – trying next centroid')
             self._goal_handle = None
@@ -398,9 +427,13 @@ class FrontierExplorer(Node):
             return
         self._goal_handle = handle
         self.get_logger().info('[goal] ACCEPTED – navigating ...')
-        handle.get_result_async().add_done_callback(self._on_goal_result)
+        handle.get_result_async().add_done_callback(
+            lambda f: self._on_goal_result(f, generation)
+        )
 
-    def _on_goal_result(self, future: Future) -> None:
+    def _on_goal_result(self, future: Future, generation: int) -> None:
+        if generation != self._goal_generation:
+            return
         status: int = future.result().status
         self._goal_handle = None
 
@@ -442,23 +475,32 @@ class FrontierExplorer(Node):
             self._centroid_queue.clear()
 
     def _mark_tried_and_continue(self) -> None:
+        self._goal_active = False
         if self._current_target is not None:
             self._tried.add(self._current_target)
             self._current_target = None
         self._try_next_goal()
 
     def _supervise_active_goal(self) -> None:
-        """Periodic watchdog for goals stuck in Nav2 recovery loops.
+        """Cancel stalled goals independently of incoming map updates.
 
-        Nav2's recovery subtree (spin → wait → backup) can iterate for a long
-        time without ever returning SUCCEEDED or ABORTED. Without a timeout,
-        ``_goal_active`` stays True forever and the explorer goes silent —
-        the user sees no frontier/goal logs and the episode runs down its
-        clock. We log progress periodically and force-cancel after a limit.
+        Eight seconds without 0.1 m of translation trigger an early retry;
+        moving goals retain the overall timeout. Delayed action callbacks are
+        invalidated so an old cancellation cannot clear the next goal.
         """
-        if self._goal_dispatch_time is None:
+        if not self._goal_active or self._goal_dispatch_time is None:
             return
-        elapsed = self.get_clock().now().nanoseconds * 1e-9 - self._goal_dispatch_time
+        now = self.get_clock().now().nanoseconds * 1e-9
+        elapsed = now - self._goal_dispatch_time
+        position = self._get_robot_pos()
+        if position is not None:
+            if (self._goal_last_progress_pos is None
+                    or math.dist(position, self._goal_last_progress_pos) >= self._PROGRESS_STEP_M):
+                self._goal_last_progress_pos = position
+                self._goal_last_progress_time = now
+        last_progress = self._goal_last_progress_time
+        stalled = (position is not None and last_progress is not None
+                   and now - last_progress >= self._NO_PROGRESS_TIMEOUT_S)
         moved = self._progress_since_dispatch()
         moved_str = f'{moved:.2f}m' if moved is not None else 'n/a'
         target_str = (
@@ -469,12 +511,15 @@ class FrontierExplorer(Node):
             f'[goal] active {elapsed:.0f}s target=({target_str}) moved={moved_str}',
             throttle_duration_sec=5.0,
         )
-        if elapsed > self._GOAL_TIMEOUT_S and self._goal_handle is not None:
+        if stalled or elapsed > self._GOAL_TIMEOUT_S:
+            reason = 'NO PROGRESS' if stalled else 'TIMEOUT'
             self.get_logger().warning(
-                f'[goal] TIMEOUT after {elapsed:.0f}s — cancelling and trying next'
+                f'[goal] {reason} after {elapsed:.0f}s — cancelling and trying next'
             )
+            self._goal_generation += 1
             try:
-                self._goal_handle.cancel_goal_async()
+                if self._goal_handle is not None:
+                    self._goal_handle.cancel_goal_async()
             except Exception as e:
                 self.get_logger().warning(f'[goal] cancel failed: {e}')
             # Defensive: mark tried locally so we skip this centroid even if

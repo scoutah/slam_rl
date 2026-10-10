@@ -1,28 +1,53 @@
 import os
+from pathlib import Path
 import shlex
 import sys
+import tempfile
 
 from ament_index_python import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import IncludeLaunchDescription, TimerAction, AppendEnvironmentVariable, ExecuteProcess, OpaqueFunction, SetEnvironmentVariable
-from launch.conditions import IfCondition, UnlessCondition
+from launch.actions import (
+    AppendEnvironmentVariable,
+    ExecuteProcess,
+    GroupAction,
+    IncludeLaunchDescription,
+    OpaqueFunction,
+    SetEnvironmentVariable,
+    TimerAction,
+)
+from launch.conditions import UnlessCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import PathJoinSubstitution, LaunchConfiguration, PythonExpression
-from launch_ros.actions import Node
-from launch_ros.substitutions import FindPackageShare
-
+from launch.substitutions import LaunchConfiguration
+from launch_ros.actions import Node, PushRosNamespace
+from tb3_slam.multi_robot import (
+    bridge_config,
+    frame,
+    namespace_cartographer_lua,
+    namespace_model_sdf,
+    namespace_nav2_params,
+    ROBOT_NAMESPACES,
+    topic,
+)
 from tb3_slam.utils import (
-    DEFAULT_WORLD_SIZE,
     check_world_size,
+    DEFAULT_WORLD_SIZE,
     generate_random_world,
     load_spawns,
     WORLD_META_FILE,
     world_meta_path,
 )
+import yaml
+
+# Every robot-local node sees its own TF tree on /<ns>/tf (the Nav2
+# multi-robot convention); frames are additionally prefixed (<ns>/base_link)
+# so the trees can later be joined without collisions.
+TF_REMAPS = [('/tf', 'tf'), ('/tf_static', 'tf_static')]
+
+CARTOGRAPHER_LUA = 'turtlebot3_lds_2d.lua'
 
 
-def prepare_world(world_size: float) -> tuple[str, float, float]:
-    """Return (world_file, spawn_x, spawn_y) for this launch.
+def prepare_world(world_size: float) -> tuple[str, list[tuple[float, float]]]:
+    """Return (world_file, robot_spawns) for this launch.
 
     Uses SLAM_WORLD_FILE if set (world_size is then ignored – a saved world
     has its size baked in), otherwise generates a random world of world_size.
@@ -55,10 +80,203 @@ def prepare_world(world_size: float) -> tuple[str, float, float]:
     # The generator writes both robot spawns (side by side at the room edge,
     # scale with world size) into the world metadata; load_spawns falls back
     # to the default geometry if a pre-made world has no fresh metadata.
-    # Single-robot stack for now: robot 1 uses the first spawn (#8 adds the
-    # second robot at spawns[1]).
-    spawn_x, spawn_y = load_spawns(WORLD_META_FILE)[0]
-    return world_file, spawn_x, spawn_y
+    return world_file, load_spawns(WORLD_META_FILE)
+
+
+def write_robot_configs(ns: str, out_dir: Path) -> dict[str, str]:
+    """Write the namespaced model SDF, bridge, Cartographer and Nav2 configs.
+
+    Returns the paths keyed by 'model', 'bridge', 'cartographer_dir', 'nav2'.
+    """
+    tb3_gazebo = Path(get_package_share_directory('turtlebot3_gazebo'))
+    robot_dir = out_dir / ns
+    robot_dir.mkdir(parents=True, exist_ok=True)
+
+    model = robot_dir / 'model.sdf'
+    model.write_text(namespace_model_sdf(
+        (tb3_gazebo / 'models' / 'turtlebot3_burger' / 'model.sdf').read_text(), ns,
+    ))
+
+    bridge = robot_dir / 'bridge.yaml'
+    bridge.write_text(yaml.safe_dump(bridge_config(ns), sort_keys=False))
+
+    # Only the robot-specific lua lives here; Cartographer resolves its
+    # includes (map_builder.lua, ...) from its own installed config dir.
+    carto_src = (Path(get_package_share_directory('turtlebot3_cartographer'))
+                 / 'config' / CARTOGRAPHER_LUA)
+    (robot_dir / CARTOGRAPHER_LUA).write_text(
+        namespace_cartographer_lua(carto_src.read_text(), ns)
+    )
+
+    nav2_src = Path(get_package_share_directory('nav2_bringup')) / 'params' / 'nav2_params.yaml'
+    nav2 = robot_dir / 'nav2_params.yaml'
+    nav2.write_text(yaml.safe_dump(
+        namespace_nav2_params(yaml.safe_load(nav2_src.read_text()), ns), sort_keys=False,
+    ))
+
+    return {
+        'model': str(model),
+        'bridge': str(bridge),
+        'cartographer_dir': str(robot_dir),
+        'nav2': str(nav2),
+    }
+
+
+def robot_stack(ns: str, spawn: tuple[float, float], configs: dict[str, str],
+                use_sim_time) -> list:
+    """Timer-sequenced simulation stack of one robot inside namespace ns.
+
+    spawn + bridge → 2 s robot_state_publisher → 5 s Cartographer
+    → 6 s startup spin → 10 s Nav2. cmd_vel_relay starts immediately.
+    """
+    spawn_x, spawn_y = spawn
+
+    spawn_robot = Node(
+        package='ros_gz_sim',
+        executable='create',
+        arguments=[
+            '-name', f'burger_{ns}',
+            '-file', configs['model'],
+            '-x', str(spawn_x),
+            '-y', str(spawn_y),
+            '-z', '0.01',
+        ],
+        output='screen',
+    )
+
+    bridge = Node(
+        package='ros_gz_bridge',
+        executable='parameter_bridge',
+        name='gz_bridge',
+        namespace=ns,
+        parameters=[{'config_file': configs['bridge'], 'use_sim_time': use_sim_time}],
+        output='log',
+    )
+
+    urdf_path = os.path.join(
+        get_package_share_directory('turtlebot3_gazebo'), 'urdf', 'turtlebot3_burger.urdf'
+    )
+    with open(urdf_path) as f:
+        robot_desc = f.read()
+
+    robot_state_publisher = Node(
+        package='robot_state_publisher',
+        executable='robot_state_publisher',
+        name='robot_state_publisher',
+        namespace=ns,
+        parameters=[{
+            'use_sim_time': use_sim_time,
+            'robot_description': robot_desc,
+            'frame_prefix': f'{ns}/',
+        }],
+        remappings=TF_REMAPS,
+        output='log',
+    )
+
+    cartographer = Node(
+        package='cartographer_ros',
+        executable='cartographer_node',
+        name='cartographer_node',
+        namespace=ns,
+        parameters=[{'use_sim_time': use_sim_time}],
+        arguments=['-configuration_directory', configs['cartographer_dir'],
+                   '-configuration_basename', CARTOGRAPHER_LUA],
+        remappings=TF_REMAPS,
+        output='log',
+    )
+    occupancy_grid = Node(
+        package='cartographer_ros',
+        executable='cartographer_occupancy_grid_node',
+        name='cartographer_occupancy_grid_node',
+        namespace=ns,
+        parameters=[{'use_sim_time': use_sim_time}],
+        arguments=['-resolution', '0.05', '-publish_period_sec', '1.0'],
+        output='log',
+    )
+
+    # Publishes TwistStamped for 4 s so Cartographer can map free cells
+    # before the exploration nodes start looking for frontiers.
+    startup_spin = ExecuteProcess(
+        cmd=[
+            'ros2', 'topic', 'pub',
+            '--rate', '10',
+            '--times', '40',
+            topic(ns, 'cmd_vel'),
+            'geometry_msgs/msg/TwistStamped',
+            f"{{header: {{frame_id: {frame(ns, 'base_link')}}}, twist: {{angular: {{z: 1.5}}}}}}",
+        ],
+        output='log',
+    )
+
+    # navigation_launch.py does not push the namespace itself (bringup_launch
+    # does), so wrap it; it remaps /tf -> tf and roots the params at ns.
+    nav2 = GroupAction([
+        PushRosNamespace(ns),
+        IncludeLaunchDescription(
+            PythonLaunchDescriptionSource(os.path.join(
+                get_package_share_directory('nav2_bringup'), 'launch', 'navigation_launch.py',
+            )),
+            launch_arguments={
+                'namespace': ns,
+                'params_file': configs['nav2'],
+                'use_sim_time': use_sim_time,
+                'autostart': 'true',
+            }.items(),
+        ),
+    ])
+
+    # Nav2 /<ns>/cmd_vel_smoothed (Twist) → /<ns>/cmd_vel (TwistStamped, gz bridge).
+    cmd_vel_relay = Node(
+        package='tb3_slam',
+        executable='cmd_vel_relay',
+        name='cmd_vel_relay',
+        namespace=ns,
+        output='log',
+        parameters=[{
+            'use_sim_time': use_sim_time,
+            'input_topic': topic(ns, 'cmd_vel_smoothed'),
+            'output_topic': topic(ns, 'cmd_vel'),
+            'frame_id': frame(ns, 'base_link'),
+        }],
+    )
+
+    return [
+        spawn_robot,
+        bridge,
+        cmd_vel_relay,
+        TimerAction(period=2.0, actions=[robot_state_publisher]),
+        TimerAction(period=5.0, actions=[cartographer, occupancy_grid]),
+        TimerAction(period=6.0, actions=[startup_spin]),
+        TimerAction(period=10.0, actions=[nav2]),
+    ]
+
+
+def explorer_node(ns: str, package: str, executable: str, name: str,
+                  use_sim_time, coverage_threshold, episode_file) -> Node:
+    """Single-robot explorer running inside namespace ns on that robot's map.
+
+    Interim until the allocator (#11) assigns goals on the merged map (#9).
+    """
+    return Node(
+        package=package,
+        executable=executable,
+        name=name,
+        namespace=ns,
+        ros_arguments=['--log-level', 'info'],
+        parameters=[{
+            'use_sim_time': use_sim_time,
+            'coverage_threshold': coverage_threshold,
+            'episode_file': episode_file,
+            'map_frame': frame(ns, 'map'),
+            'base_frame': frame(ns, 'base_link'),
+        }],
+        # The nodes use absolute names; resolve them inside the namespace.
+        remappings=TF_REMAPS + [
+            ('/map', 'map'),
+            ('/cmd_vel', 'cmd_vel'),
+            ('/frontiers_viz', 'frontiers_viz'),
+        ],
+    )
 
 
 def generate_launch_description():
@@ -70,15 +288,15 @@ def generate_launch_description():
     max_episode_duration = LaunchConfiguration('max_episode_duration', default='600.0')
     world_size = LaunchConfiguration('world_size', default=str(DEFAULT_WORLD_SIZE))
 
-    launch_file_dir = os.path.join(get_package_share_directory('turtlebot3_gazebo'), 'launch')
     ros_gz_sim = get_package_share_directory('ros_gz_sim')
 
-    # ── World + Gazebo server + robot spawn ─────────────────────────────
+    # ── World + Gazebo server + both robot stacks ───────────────────────
     # The world is generated at launch time (not description time) so the
-    # world_size launch argument can be resolved first.
+    # world_size launch argument can be resolved first; the robot stacks
+    # need the spawns from that world's metadata.
 
     def launch_world(context):
-        world_file, spawn_x, spawn_y = prepare_world(
+        world_file, spawns = prepare_world(
             check_world_size(float(world_size.perform(context)))
         )
         gzserver_cmd = IncludeLaunchDescription(
@@ -90,17 +308,19 @@ def generate_launch_description():
                 'on_exit_shutdown': 'true',
             }.items(),
         )
-        spawn_turtlebot_cmd = IncludeLaunchDescription(
-            PythonLaunchDescriptionSource(
-                os.path.join(launch_file_dir, 'spawn_turtlebot3.launch.py')
-            ),
-            launch_arguments={
-                'x_pose': str(spawn_x),
-                'y_pose': str(spawn_y),
-                'use_sim_time': use_sim_time,
-            }.items(),
+        # One global sim clock for all nodes (the robot bridges skip it).
+        clock_bridge = Node(
+            package='ros_gz_bridge',
+            executable='parameter_bridge',
+            name='clock_bridge',
+            arguments=['/clock@rosgraph_msgs/msg/Clock[gz.msgs.Clock'],
+            output='log',
         )
-        return [gzserver_cmd, spawn_turtlebot_cmd]
+        config_dir = Path(tempfile.mkdtemp(prefix='slam_rl_robots_'))
+        robots = []
+        for ns, spawn in zip(ROBOT_NAMESPACES, spawns):
+            robots += robot_stack(ns, spawn, write_robot_configs(ns, config_dir), use_sim_time)
+        return [gzserver_cmd, clock_bridge, *robots]
 
     # ── Gazebo GUI ──────────────────────────────────────────────────────
 
@@ -112,86 +332,13 @@ def generate_launch_description():
         condition=UnlessCondition(headless),
     )
 
-    robot_state_publisher_cmd = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(
-            os.path.join(launch_file_dir, 'robot_state_publisher.launch.py')
-        ),
-        launch_arguments={'use_sim_time': use_sim_time}.items(),
-    )
-
-    robot_state_publisher_delayed = TimerAction(period=2.0, actions=[robot_state_publisher_cmd])
-
     set_env_vars_resources = AppendEnvironmentVariable(
         'GZ_SIM_RESOURCE_PATH',
         os.path.join(get_package_share_directory('turtlebot3_gazebo'), 'models'),
     )
 
-    # ── SLAM & Navigation ────────────────────────────────────────────────
-
-    turtlebot3_cartographer_launch = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource([
-            PathJoinSubstitution([
-                FindPackageShare('turtlebot3_cartographer'),
-                'launch',
-                'cartographer.launch.py',
-            ])
-        ]),
-        launch_arguments={'use_sim_time': use_sim_time}.items(),
-    )
-
-    turtlebot3_cartographer_launch_delayed = TimerAction(
-        period=5.0, actions=[turtlebot3_cartographer_launch]
-    )
-
-    nav2_launch = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource([
-            PathJoinSubstitution([
-                FindPackageShare('nav2_bringup'),
-                'launch',
-                'navigation_launch.py',
-            ])
-        ]),
-        launch_arguments={
-            'use_sim_time': use_sim_time,
-            'autostart': 'true',
-        }.items(),
-    )
-
-    nav2_launch_delayed = TimerAction(period=10.0, actions=[nav2_launch])
-
-    # ── Startup spin (after Cartographer, before Nav2) ───────────────────
-    # Publishes TwistStamped to /cmd_vel for 4 s so Cartographer can map
-    # free cells before the exploration nodes start looking for frontiers.
-
-    startup_spin = ExecuteProcess(
-        cmd=[
-            'ros2', 'topic', 'pub',
-            '--rate', '10',
-            '--times', '40',
-            '/cmd_vel',
-            'geometry_msgs/msg/TwistStamped',
-            '{header: {frame_id: base_link}, twist: {angular: {z: 1.5}}}',
-        ],
-        output='log',
-    )
-    startup_spin_delayed = TimerAction(period=6.0, actions=[startup_spin])
-
-    # ── Velocity relay ───────────────────────────────────────────────────
-
-    cmd_vel_relay = Node(
-        package='tb3_slam',
-        executable='cmd_vel_relay',
-        name='cmd_vel_relay',
-        output='log',
-        parameters=[{
-            'use_sim_time': use_sim_time,
-            'input_topic': '/cmd_vel_smoothed',
-            'output_topic': '/cmd_vel',
-            'frame_id': 'base_link',
-        }],
-    )
-
     # ── Episode manager ──────────────────────────────────────────────────
+    # TODO(#10): run on the merged map; until then robot 1's map decides.
 
     episode_manager = Node(
         package='tb3_slam',
@@ -204,25 +351,30 @@ def generate_launch_description():
             'coverage_threshold': coverage_threshold,
             'max_episode_duration': max_episode_duration,
         }],
+        remappings=[('/map', topic(ROBOT_NAMESPACES[0], 'map'))],
     )
 
     # ── Exploration nodes (mutually exclusive) ───────────────────────────
-    # Start both with a delay so SLAM + Nav2 are ready first.
+    # Start with a delay so SLAM + Nav2 are ready first.
 
-    frontier_explorer = Node(
-        package='tb3_exploration',
-        executable='frontier_explorer',
-        name='frontier_explorer',
-        ros_arguments=['--log-level', 'info'],
-        parameters=[{
-            'use_sim_time': use_sim_time,
-            'coverage_threshold': coverage_threshold,
-            'episode_file': episode_file,
-        }],
-        condition=IfCondition(
-            PythonExpression(["'", exploration_mode, "' == 'classic'"])
-        ),
-    )
+    def launch_explorers(context):
+        mode = exploration_mode.perform(context)
+        if mode == 'classic':
+            return [
+                explorer_node(ns, 'tb3_exploration', 'frontier_explorer', 'frontier_explorer',
+                              use_sim_time, coverage_threshold, episode_file)
+                for ns in ROBOT_NAMESPACES
+            ]
+        if mode == 'rl':
+            # The DQN persists to one shared rl_data/ dir, so only robot 1 runs
+            # it until the centralised allocator (#13) replaces it.
+            return [explorer_node(ROBOT_NAMESPACES[0], 'tb3_reinforced_exploration',
+                                  'reinforced_exploration', 'rl_agent',
+                                  use_sim_time, coverage_threshold, episode_file)]
+        if mode == 'none':
+            # Bare stack: goals come from outside (manual tests, allocator).
+            return []
+        raise ValueError(f"exploration_mode must be 'classic', 'rl' or 'none' (got {mode!r})")
 
     # The RL agent needs PyTorch which lives in the project-local .venv.
     # We inject the venv's site-packages into PYTHONPATH so the system Python
@@ -234,24 +386,9 @@ def generate_launch_description():
 
     inject_venv = AppendEnvironmentVariable('PYTHONPATH', _venv_site)
 
-    rl_agent = Node(
-        package='tb3_reinforced_exploration',
-        executable='reinforced_exploration',
-        name='rl_agent',
-        ros_arguments=['--log-level', 'info'],
-        parameters=[{
-            'use_sim_time': use_sim_time,
-            'coverage_threshold': coverage_threshold,
-            'episode_file': episode_file,
-        }],
-        condition=IfCondition(
-            PythonExpression(["'", exploration_mode, "' == 'rl'"])
-        ),
-    )
-
     exploration_delayed = TimerAction(
         period=20.0,
-        actions=[frontier_explorer, rl_agent],
+        actions=[OpaqueFunction(function=launch_explorers)],
     )
 
     return LaunchDescription([
@@ -262,11 +399,6 @@ def generate_launch_description():
         inject_venv,
         OpaqueFunction(function=launch_world),
         gzclient_cmd,
-        robot_state_publisher_delayed,
-        turtlebot3_cartographer_launch_delayed,
-        startup_spin_delayed,
-        nav2_launch_delayed,
-        cmd_vel_relay,
         episode_manager,
         exploration_delayed,
     ])

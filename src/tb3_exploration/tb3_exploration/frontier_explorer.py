@@ -42,9 +42,13 @@ class FrontierExplorer(Node):
 
         self.declare_parameter('coverage_threshold', DEFAULT_COVERAGE_THRESHOLD)
         self.declare_parameter('episode_file', '')
+        self.declare_parameter('map_frame', 'map')
+        self.declare_parameter('base_frame', 'base_link')
 
         self._coverage_threshold: float = self.get_parameter('coverage_threshold').value
         self._episode_file: str = self.get_parameter('episode_file').value
+        self._map_frame: str = self.get_parameter('map_frame').value
+        self._base_frame: str = self.get_parameter('base_frame').value
         self._coverage_done = False
 
         # Navigation state
@@ -146,6 +150,7 @@ class FrontierExplorer(Node):
                 stamp=self.get_clock().now().to_msg(),
                 centroids=centroids,
                 goal_color=(0.0, 1.0, 0.0),
+                frame_id=self._map_frame,
             )
         )
 
@@ -199,7 +204,9 @@ class FrontierExplorer(Node):
 
     def _get_robot_pos(self) -> tuple[float, float] | None:
         try:
-            t = self._tf_buffer.lookup_transform('map', 'base_link', rclpy.time.Time())
+            t = self._tf_buffer.lookup_transform(
+                self._map_frame, self._base_frame, rclpy.time.Time(),
+            )
             return t.transform.translation.x, t.transform.translation.y
         except Exception as e:
             self.get_logger().warning(f'[tf] Could not get robot position: {e}')
@@ -239,7 +246,7 @@ class FrontierExplorer(Node):
             wx, wy = grid_to_world(cell, map_msg)
             goal = ComputePathToPose.Goal()
             pose = PoseStamped()
-            pose.header.frame_id = 'map'
+            pose.header.frame_id = self._map_frame
             pose.header.stamp = self.get_clock().now().to_msg()
             pose.pose.position.x = wx
             pose.pose.position.y = wy
@@ -397,7 +404,7 @@ class FrontierExplorer(Node):
 
         goal = NavigateToPose.Goal()
         pose = PoseStamped()
-        pose.header.frame_id = 'map'
+        pose.header.frame_id = self._map_frame
         pose.header.stamp = self.get_clock().now().to_msg()
         pose.pose.position.x = x
         pose.pose.position.y = y

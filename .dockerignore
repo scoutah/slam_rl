@@ -1,0 +1,30 @@
+# Build / runtime artefacts – rebuilt or generated inside the container
+build/
+install/
+log/
+
+# Host virtualenv (Linux container builds its own; macOS venv must never leak in)
+.venv/
+
+# Generated data – mounted as volumes at runtime, not baked into the image
+worlds/
+results/
+rl_data/
+
+# Caches / editor / VCS
+__pycache__/
+**/__pycache__/
+*.pyc
+.pytest_cache/
+.vscode/
+.kiro/
+.claude/
+.git/
+.gitignore
+.DS_Store
+
+# Docker's own files. Note: docker/ is NOT excluded – the Dockerfile COPYs
+# docker/entrypoint.sh from the build context.
+Dockerfile
+.dockerignore
+compose.yaml

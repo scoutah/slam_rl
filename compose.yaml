@@ -1,0 +1,63 @@
+# Docker Compose for the headless SLAM-RL simulation / training.
+#
+# Two services share one image:
+#   dev   – interactive shell for colcon build, tests, poking around
+#   train – runs training_runner.py (override args on the command line)
+#
+# `init: true` is important: training_runner.py spawns a whole process tree
+# (gz sim, Nav2 nodes, Cartographer, bridges) and tears it down with pkill
+# between episodes. Without an init/PID-1 reaper, zombie processes would
+# accumulate across many episodes.
+#
+# The three generated-data dirs are bind-mounted from the host checkout so
+# results, worlds and the RL model survive container restarts and are visible
+# on the host. src/ is also mounted so code edits on the host take effect
+# after an in-container `colcon build` (no image rebuild needed for dev).
+
+x-common: &common
+  build:
+    context: .
+    dockerfile: Dockerfile
+  image: slam-rl:latest
+  init: true
+  environment:
+    TURTLEBOT3_MODEL: burger
+    SLAM_RL_DATA_DIR: /root/projects/slam_rl/rl_data
+  working_dir: /root/projects/slam_rl
+
+# Generated-data mounts shared by both services: results, worlds and the RL
+# model persist to the host checkout and survive container restarts.
+x-data-volumes: &data-volumes
+  - ./results:/root/projects/slam_rl/results
+  - ./worlds:/root/projects/slam_rl/worlds
+  - ./rl_data:/root/projects/slam_rl/rl_data
+
+services:
+  # Interactive shell for development. Mounts src/ so host edits take effect
+  # after an in-container `colcon build`. Run:  docker compose run --rm dev
+  dev:
+    <<: *common
+    stdin_open: true
+    tty: true
+    volumes:
+      - ./src:/root/projects/slam_rl/src
+      - ./training_runner.py:/root/projects/slam_rl/training_runner.py
+      - ./tools:/root/projects/slam_rl/tools
+      - ./results:/root/projects/slam_rl/results
+      - ./worlds:/root/projects/slam_rl/worlds
+      - ./rl_data:/root/projects/slam_rl/rl_data
+    command: bash
+
+  # Training runner. Does NOT mount src/: it runs the code baked into the image
+  # at build time, so a run is reproducible. Rebuild the image to pick up code
+  # changes. Uses the train.sh entrypoint, which runs training_runner.py and
+  # forwards all args to it, so you can pass runner flags directly:
+  #   docker compose run --rm train --episodes 1 --headless
+  #   docker compose run --rm train --mode rl --episodes 50 --headless
+  # With no extra args the `command` below provides sensible defaults.
+  train:
+    <<: *common
+    entrypoint: ["/usr/local/bin/train.sh"]
+    volumes: *data-volumes
+    command: ["--mode", "classic", "--episodes", "10", "--headless"]
+

@@ -170,6 +170,28 @@ classical allocator and a centralised pointwise-DQN allocator. Both methods run 
 worlds, frontier detection, Nav2 config, episode-end rules and metrics; evaluation compares
 time to coverage, stuck/timeout rate and distance travelled across many episodes.
 
+## Docker (headless)
+
+Headless-only containerisation for the macOS co-developer and AWS training (no
+GUI – no Gazebo client, no RViz). Files at repo root: `Dockerfile`,
+`compose.yaml`, `.dockerignore`, plus `docker/entrypoint.sh`, `docker/train.sh`,
+`docker/README.md`.
+
+- Base `ros:jazzy-ros-base` (multi-arch amd64 + arm64, Python 3.12); sim stack
+  (TurtleBot3, `ros-gz`, Nav2, Cartographer, `tf-transformations`) installed via
+  apt – it is **not** in the `package.xml` files. CPU-only torch in a venv at
+  `<workspace>/.venv` (the launch file injects `python3.12/site-packages`).
+- Workspace lives at `/root/projects/slam_rl`; RL persistence goes to
+  `SLAM_RL_DATA_DIR` (set by the entrypoints to `<workspace>/rl_data`).
+- Two compose services share the image: `dev` (interactive shell, mounts `src/`
+  for live edits → rebuild inside) and `train` (runs `training_runner.py` via
+  `docker/train.sh`, which forwards all args; `src/` **not** mounted, so runs are
+  reproducible from the built image). Both use `init: true` to reap the process
+  tree the runner spawns/kills each episode.
+- Usage: `docker compose build`, then
+  `docker compose run --rm train --episodes 1 --headless` or
+  `docker compose run --rm dev`. `results/`, `worlds/`, `rl_data/` are bind-mounted.
+
 ## Conventions
 
 - Python, ROS 2 `rclpy`; type hints with `X | None`; package tests via `colcon test`
@@ -177,3 +199,9 @@ time to coverage, stuck/timeout rate and distance travelled across many episodes
 - Shared logic goes in `tb3_slam`, not duplicated in the explorer packages.
 - Keep `frontier_utils.py` free of ROS message imports beyond `OccupancyGrid` (viz lives
   in `frontier_viz.py`).
+- After any change, check whether the Docker image or its commands/docs need updating:
+  new apt/pip dependencies or a changed Python version → `Dockerfile`; new launch
+  args, entrypoint behaviour or data paths → `docker/entrypoint.sh` /
+  `docker/train.sh` / `compose.yaml`; changed usage → `docker/README.md` (and the
+  Docker section above). The sim stack is apt-installed in the `Dockerfile`, not via
+  `package.xml`, so new ROS/sim dependencies must be added there too.

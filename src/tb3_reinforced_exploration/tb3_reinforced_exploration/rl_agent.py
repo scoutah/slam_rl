@@ -194,6 +194,8 @@ class RLExplorer(Node):
             'coverage_threshold', DEFAULT_COVERAGE_THRESHOLD,
         )
         self.declare_parameter('episode_file', '')
+        self.declare_parameter('map_frame', 'map')
+        self.declare_parameter('base_frame', 'base_link')
 
         self._coverage_threshold: float = (
             self.get_parameter('coverage_threshold').value
@@ -201,6 +203,8 @@ class RLExplorer(Node):
         self._episode_file: str = (
             self.get_parameter('episode_file').value
         )
+        self._map_frame: str = self.get_parameter('map_frame').value
+        self._base_frame: str = self.get_parameter('base_frame').value
         self._coverage_done = False
 
         # ── Coverage tracking ─────────────────────────────────
@@ -355,6 +359,7 @@ class RLExplorer(Node):
                 stamp=self.get_clock().now().to_msg(),
                 centroids=centroids,
                 goal_color=(0.0, 1.0, 0.0),
+                frame_id=self._map_frame,
             )
         )
 
@@ -409,7 +414,7 @@ class RLExplorer(Node):
             wx, wy = grid_to_world(cell, map_msg)
             goal = ComputePathToPose.Goal()
             pose = PoseStamped()
-            pose.header.frame_id = 'map'
+            pose.header.frame_id = self._map_frame
             pose.header.stamp = self.get_clock().now().to_msg()
             pose.pose.position.x = wx
             pose.pose.position.y = wy
@@ -657,7 +662,7 @@ class RLExplorer(Node):
 
         goal = NavigateToPose.Goal()
         pose = PoseStamped()
-        pose.header.frame_id = 'map'
+        pose.header.frame_id = self._map_frame
         pose.header.stamp = self.get_clock().now().to_msg()
         pose.pose.position.x = x
         pose.pose.position.y = y
@@ -737,7 +742,7 @@ class RLExplorer(Node):
             f'[idle] No goal for {idle:.0f}s – spinning'
         )
         msg = TwistStamped()
-        msg.header.frame_id = 'base_link'
+        msg.header.frame_id = self._base_frame
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.twist.angular.z = 1.5
         self._cmd_vel_pub.publish(msg)
@@ -766,7 +771,7 @@ class RLExplorer(Node):
         """Look up current robot position from TF."""
         try:
             t = self._tf_buffer.lookup_transform(
-                'map', 'base_link', rclpy.time.Time(),
+                self._map_frame, self._base_frame, rclpy.time.Time(),
             )
             return (
                 t.transform.translation.x,

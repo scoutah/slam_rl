@@ -48,18 +48,36 @@ Three ament_python packages in `src/`:
 **Launch sequence** (`src/tb3_slam/launch/sim_slam.launch.py`, timer-based):
 world generated at launch time in an `OpaqueFunction` (so the `world_size` launch arg is
 resolved; skipped if env `SLAM_WORLD_FILE` is set) →
-gz server (+ GUI unless headless) → spawn robot near the south wall (edge entry,
-scales with world size; `spawns[0]` of the world metadata until #8 adds robot 2) → 2 s robot_state_publisher
-→ 5 s Cartographer (`turtlebot3_cartographer`) → 6 s startup spin (4 s of TwistStamped on
-`/cmd_vel`) → 10 s Nav2 (`nav2_bringup/navigation_launch.py`, default params) →
-20 s exploration node. `episode_manager` and `cmd_vel_relay` start immediately.
+gz server (+ GUI unless headless) + one global `/clock` bridge → **per robot `r1`, `r2`**
+(namespaces `ROBOT_NAMESPACES`, spawns from the world metadata, both stacks in parallel):
+spawn `burger_<ns>` + gz bridge + `cmd_vel_relay` → 2 s robot_state_publisher → 5 s
+Cartographer (`cartographer_node` + `cartographer_occupancy_grid_node`, launched directly, no
+RViz) → 6 s startup spin (4 s of TwistStamped on `/<ns>/cmd_vel`) → 10 s Nav2
+(`nav2_bringup/navigation_launch.py` under `PushRosNamespace`, default params rewritten per
+robot) → 20 s exploration. `episode_manager` starts immediately.
+`exploration_mode:=classic` runs one `frontier_explorer` per robot on its own map, `:=rl` runs
+the DQN for `r1` only (shared `rl_data/`), `:=none` brings up the bare stack (goals from
+outside). All interim until the allocator (#11) works on the merged map (#9).
 
-**Data flow**
-- `/map` (OccupancyGrid from Cartographer) → explorers + episode_manager.
+**Namespacing** (`tb3_slam/multi_robot.py`, pure Python, unit-tested): at launch the upstream
+burger `model.sdf`, bridge yaml, `turtlebot3_lds_2d.lua` and `nav2_params.yaml` are rewritten
+per robot into a `/tmp/slam_rl_robots_*/<ns>/` dir. Every robot has
+- its own topics `/<ns>/{scan,odom,imu,joint_states,cmd_vel,map,…}` and actions
+  `/<ns>/navigate_to_pose`, `/<ns>/compute_path_to_pose`;
+- its own TF tree on **`/<ns>/tf`, `/<ns>/tf_static`** (Nav2 multi-robot convention; every
+  robot node remaps `/tf` → `tf`), nothing on the global `/tf`;
+- prefixed frames `<ns>/map → <ns>/odom → <ns>/base_footprint → <ns>/base_link …` (gz
+  DiffDrive frame ids, RSP `frame_prefix`, Cartographer lua, Nav2 params), so the trees can be
+  joined later without collisions. `<ns>/map` starts at that robot's spawn pose.
+To inspect a tree: `ros2 run tf2_ros tf2_echo r1/map r1/base_link --ros-args -r /tf:=/r1/tf -r /tf_static:=/r1/tf_static`.
+
+**Data flow** (per robot unless noted)
+- `/<ns>/map` (OccupancyGrid from Cartographer) → that robot's explorer; `episode_manager`
+  watches `/r1/map` until the merged map exists (#10).
 - Nav2 actions used: `navigate_to_pose`, `compute_path_to_pose` (for ranking candidates).
-- `cmd_vel_relay`: Nav2 `/cmd_vel_smoothed` (Twist) → `/cmd_vel` (TwistStamped, Jazzy gz bridge).
-- `/frontiers_viz` (MarkerArray) for RViz; `/episode/coverage` (Float32).
-- All topics/frames are **global, single-robot** (`/map`, `/cmd_vel`, `map`→`base_link`).
+- `cmd_vel_relay`: Nav2 `/<ns>/cmd_vel_smoothed` (Twist) → `/<ns>/cmd_vel` (TwistStamped, Jazzy gz bridge).
+- `/<ns>/frontiers_viz` (MarkerArray) for RViz; `/episode/coverage` (Float32, global).
+- Explorers take `map_frame` / `base_frame` parameters (defaults `map` / `base_link`).
 
 **Inter-process files in `/tmp`**
 - `/tmp/slam_world_meta.json` – `expected_traversable_cells` (+ `spawns`, `world_size`), written by
@@ -161,7 +179,8 @@ robots' clearance discs overlap.
 
 ## Known issues (state at start of WS 2026/27)
 
-1. **Single-robot everything** (no namespaces, one Cartographer, one Nav2, one `/map`).
+1. **No merged map yet** (#9): two namespaced stacks run (#8), but frontier detection,
+   coverage and episode end still see single-robot maps.
 
 ## Studienbericht 2 – multi-robot exploration
 

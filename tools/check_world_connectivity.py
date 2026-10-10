@@ -8,7 +8,9 @@ radius and checks:
 
   * connectivity – is all free space one connected region? More than one
     region means some room is unreachable for a robot of that clearance.
-  * spawn        – is the robot spawn point itself inside (inflated) wall?
+  * spawns        – for each robot: is its spawn point inside (inflated) wall
+                   (blocked), or outside the main free region (stranded)?
+                   Do the two robots' clearance discs overlap?
 
 Usage:
     python3 tools/check_world_connectivity.py                 # 300 worlds
@@ -20,7 +22,7 @@ Usage:
 Only needs numpy (e.g. `uv run --no-project --with numpy python ...`).
 """
 import argparse
-import json
+import math
 import random
 import sys
 import tempfile
@@ -55,23 +57,23 @@ def load_walls(sdf_path: Path) -> list[tuple[float, float, float, float]]:
     return walls
 
 
-def load_spawn(sdf_path: Path) -> tuple[float, float]:
-    """Robot spawn (x, y) from the world's metadata sidecar.
+def load_spawns(sdf_path: Path) -> list[tuple[float, float]]:
+    """Robot spawns [(x, y), ...] from the world's metadata sidecar.
 
-    The generator writes the spawn next to every world, so it matches what the
-    launch file uses for that world. Worlds without a sidecar fall back to the
-    default world geometry.
+    Read via the same helper as the launch file, so the check tests exactly
+    the poses the robots are spawned at.
     """
-    try:
-        meta = json.loads(utils.world_meta_path(str(sdf_path)).read_text())
-        return float(meta['spawn_x']), float(meta['spawn_y'])
-    except (OSError, ValueError, KeyError):
-        return utils.spawn_pose(utils.DEFAULT_WORLD_SIZE, utils.WALL_THICKNESS)
+    return utils.load_spawns(utils.world_meta_path(str(sdf_path)))
 
 
 def analyze(walls, clearance: float,
-            spawn_xy: tuple[float, float]) -> tuple[bool, int]:
-    """Return (spawn_blocked, number_of_free_regions) for one world."""
+            spawns: list[tuple[float, float]]) -> tuple[list[str], int]:
+    """Return (status per spawn, number_of_free_regions) for one world.
+
+    A spawn's status is 'ok', 'blocked' (inside inflated wall) or 'stranded'
+    (free, but not in the largest free region, so it cannot reach the rest of
+    the world).
+    """
     extent = max(max(abs(x) + sx / 2, abs(y) + sy / 2) for x, y, sx, sy in walls) + 0.1
 
     n = int(2 * extent / RASTER_RES)
@@ -85,28 +87,38 @@ def analyze(walls, clearance: float,
         outer = max(outer, abs(x) - sx / 2, abs(y) - sy / 2)
     free = ~blocked & (np.abs(X) < outer) & (np.abs(Y) < outer)
 
-    sr = int((spawn_xy[1] + extent) / RASTER_RES)
-    sc = int((spawn_xy[0] + extent) / RASTER_RES)
-    spawn_blocked = not free[sr, sc]
-
-    seen = np.zeros_like(free)
+    # Label 4-connected free regions (0 = not free).
+    labels = np.zeros((n, n), dtype=np.int32)
+    sizes = [0]
     min_cells = MIN_REGION_AREA / RASTER_RES ** 2
-    regions = 0
     for r, c in zip(*np.nonzero(free)):
-        if seen[r, c]:
+        if labels[r, c]:
             continue
-        seen[r, c] = True
+        label = len(sizes)
+        labels[r, c] = label
         queue, size = deque([(r, c)]), 0
         while queue:
             a, b = queue.popleft()
             size += 1
             for u, v in ((a + 1, b), (a - 1, b), (a, b + 1), (a, b - 1)):
-                if 0 <= u < n and 0 <= v < n and free[u, v] and not seen[u, v]:
-                    seen[u, v] = True
+                if 0 <= u < n and 0 <= v < n and free[u, v] and not labels[u, v]:
+                    labels[u, v] = label
                     queue.append((u, v))
-        if size >= min_cells:
-            regions += 1
-    return spawn_blocked, regions
+        sizes.append(size)
+    regions = sum(size >= min_cells for size in sizes[1:])
+    main = int(np.argmax(sizes))
+
+    status = []
+    for x, y in spawns:
+        label = labels[int((y + extent) / RASTER_RES), int((x + extent) / RASTER_RES)]
+        status.append('blocked' if not label else 'ok' if label == main else 'stranded')
+    return status, regions
+
+
+def spawns_overlap(spawns: list[tuple[float, float]], clearance: float) -> bool:
+    """True if any two robots' clearance discs overlap at their spawns."""
+    return any(math.dist(a, b) < 2 * clearance
+               for i, a in enumerate(spawns) for b in spawns[i + 1:])
 
 
 def main() -> None:
@@ -145,25 +157,29 @@ def main() -> None:
 
 
 def report(paths: list[Path], clearances: list[float], list_failures: bool) -> None:
-    """Print disconnected / spawn-blocked counts per clearance radius."""
-    worlds = [(p, load_walls(p), load_spawn(p)) for p in paths]
+    """Print disconnected / per-robot spawn failure counts per clearance radius."""
+    worlds = [(p, load_walls(p), load_spawns(p)) for p in paths]
     total = len(worlds)
     for clearance in clearances:
-        disconnected, spawn_blocked = [], []
-        for path, walls, spawn_xy in worlds:
-            sb, regions = analyze(walls, clearance, spawn_xy)
+        failures: dict[str, list[str]] = {'disconnected': [], 'spawns overlap': []}
+        for i in range(utils.NUM_ROBOTS):
+            failures[f'r{i + 1} blocked'] = []
+            failures[f'r{i + 1} stranded'] = []
+        for path, walls, spawns in worlds:
+            status, regions = analyze(walls, clearance, spawns)
             if regions > 1:
-                disconnected.append(path.name)
-            if sb:
-                spawn_blocked.append(path.name)
+                failures['disconnected'].append(path.name)
+            if spawns_overlap(spawns, clearance):
+                failures['spawns overlap'].append(path.name)
+            for i, st in enumerate(status):
+                if st != 'ok':
+                    failures[f'r{i + 1} {st}'].append(path.name)
         print(f'  clearance {clearance:.2f} m: '
-              f'disconnected {len(disconnected)}/{total}, '
-              f'spawn blocked {len(spawn_blocked)}/{total}')
+              + ', '.join(f'{kind} {len(names)}/{total}' for kind, names in failures.items()))
         if list_failures:
-            for name in disconnected:
-                print(f'    disconnected: {name}')
-            for name in spawn_blocked:
-                print(f'    spawn blocked: {name}')
+            for kind, names in failures.items():
+                for name in names:
+                    print(f'    {kind}: {name}')
 
 
 if __name__ == '__main__':

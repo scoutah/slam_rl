@@ -256,6 +256,8 @@ _STALE_PATTERNS = [
     'reinforced_exploration',
     'episode_manager',
     'cmd_vel_relay',
+    'map_merge',
+    'static_transform_publisher',
     'robot_state_publisher',
 ]
 

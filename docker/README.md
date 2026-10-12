@@ -30,6 +30,12 @@ docker compose run --rm dev
 `results/`, `worlds/` and `rl_data/` are bind-mounted from your checkout, so
 CSVs, generated worlds and the trained model appear directly in your local repo.
 
+## Map merging
+
+`multirobot_map_merge` has no apt package. The image builds it from source at the
+commit pinned in `tools/install_map_merge.sh` (overlay `/opt/m-explore-ws`, sourced
+by the entrypoint). Changing the pin requires `docker compose build`.
+
 ## Editing code
 
 `src/`, `training_runner.py` and `tools/` are mounted into the container. Edit

@@ -14,6 +14,10 @@ from tb3_slam.utils import NUM_ROBOTS
 
 ROBOT_NAMESPACES: tuple[str, ...] = tuple(f'r{i + 1}' for i in range(NUM_ROBOTS))
 
+# Frame (and topic name) of the merged global map; each robot's own map frame
+# ``<ns>/map`` is a child of it, offset by the robot's spawn pose.
+MERGED_MAP_FRAME: str = 'map'
+
 # Gazebo model SDF elements holding topic names and frame ids.
 _SDF_TOPIC_TAGS = ('topic', 'odom_topic', 'tf_topic')
 _SDF_FRAME_TAGS = ('frame_id', 'child_frame_id', 'gz_frame_id')
@@ -145,3 +149,26 @@ def namespace_nav2_params(params: dict, ns: str) -> dict:
     rewritten = copy.deepcopy(params)
     _namespace_nav2_node(rewritten, ns)
     return rewritten
+
+
+def map_merge_params(spawns: list[tuple[float, float]]) -> dict[str, float]:
+    """Return the ``multirobot_map_merge`` initial-pose parameters per robot.
+
+    Every ``<ns>/map`` starts at that robot's spawn pose with yaw 0 (the robots
+    are spawned without rotation and Cartographer's map origin is the robot's
+    start), so the pose of ``<ns>/map`` in the merged frame is just the spawn.
+    The node derives the robot name from the topic (``/<ns>/map`` -> ``/<ns>``)
+    and reads ``<robot>/map_merge/init_pose_{x,y,z,yaw}``.
+    """
+    if len(spawns) != len(ROBOT_NAMESPACES):
+        raise ValueError(
+            f'expected {len(ROBOT_NAMESPACES)} spawns, got {len(spawns)}'
+        )
+    params: dict[str, float] = {}
+    for ns, (x, y) in zip(ROBOT_NAMESPACES, spawns):
+        prefix = f'/{ns}/map_merge'
+        params[f'{prefix}/init_pose_x'] = float(x)
+        params[f'{prefix}/init_pose_y'] = float(y)
+        params[f'{prefix}/init_pose_z'] = 0.0
+        params[f'{prefix}/init_pose_yaw'] = 0.0
+    return params

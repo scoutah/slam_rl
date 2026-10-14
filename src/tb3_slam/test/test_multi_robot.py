@@ -6,7 +6,6 @@ import pytest
 from tb3_slam.multi_robot import (
     bridge_config,
     frame,
-    map_merge_params,
     MERGED_MAP_FRAME,
     namespace_cartographer_lua,
     namespace_model_sdf,
@@ -277,25 +276,6 @@ def test_nav2_idempotent():
     twice = namespace_nav2_params(once, 'r1')
 
     assert twice == once
-
-
-def test_map_merge_params_use_spawns_as_initial_poses():
-    params = map_merge_params([(-0.5, -3.9), (0.5, -3.9)])
-    assert params == {
-        '/r1/map_merge/init_pose_x': -0.5,
-        '/r1/map_merge/init_pose_y': -3.9,
-        '/r1/map_merge/init_pose_z': 0.0,
-        '/r1/map_merge/init_pose_yaw': 0.0,
-        '/r2/map_merge/init_pose_x': 0.5,
-        '/r2/map_merge/init_pose_y': -3.9,
-        '/r2/map_merge/init_pose_z': 0.0,
-        '/r2/map_merge/init_pose_yaw': 0.0,
-    }
-
-
-def test_map_merge_params_reject_wrong_robot_count():
-    with pytest.raises(ValueError):
-        map_merge_params([(0.0, 0.0)])
 
 
 def test_merged_map_frame_is_not_a_robot_frame():

@@ -117,6 +117,14 @@ def load_spawns(meta_path: Path) -> List[Tuple[float, float]]:
         return spawn_poses(DEFAULT_WORLD_SIZE)
 
 
+def load_world_size(meta_path: Path) -> float:
+    """Edge length of the world from a world metadata file (default if unknown)."""
+    try:
+        return float(json.loads(Path(meta_path).read_text())['world_size'])
+    except (OSError, KeyError, TypeError, ValueError):
+        return DEFAULT_WORLD_SIZE
+
+
 def check_world_size(world_size: float) -> float:
     """Return world_size if it is one of WORLD_SIZES, else raise ValueError."""
     if world_size not in WORLD_SIZES:

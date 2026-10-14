@@ -34,16 +34,6 @@ sudo apt install \
   ros-jazzy-nav2-bringup
 ```
 
-### 3b. Map-Merging (multirobot_map_merge)
-
-Kein apt-Paket – wird mit festem Commit aus dem Quellcode in einen eigenen
-Overlay-Workspace (`~/m-explore-ws`) gebaut:
-
-```bash
-tools/install_map_merge.sh   # nach dem Klonen (Schritt 4) ausführen
-echo 'source ~/m-explore-ws/install/setup.bash' >> ~/.bashrc  # VOR dem Projekt-Setup
-```
-
 ### 4. Repository klonen
 
 ```bash

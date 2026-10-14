@@ -33,21 +33,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ros-jazzy-nav2-bringup \
         ros-jazzy-ros-gz \
         ros-jazzy-tf-transformations \
-        git \
-        build-essential \
-        python3-rosdep \
     && rm -rf /var/lib/apt/lists/*
-
-# ─────────────────────────────────────────────────────────────────────────────
-# multirobot_map_merge (map merging, #9): no apt binary, so it is built from
-# source at the commit pinned in tools/install_map_merge.sh into its own overlay
-# workspace. The entrypoint sources it before the project workspace.
-# ─────────────────────────────────────────────────────────────────────────────
-ENV M_EXPLORE_WS=/opt/m-explore-ws
-COPY tools/install_map_merge.sh /tmp/install_map_merge.sh
-RUN (rosdep update || true) \
-    && /tmp/install_map_merge.sh \
-    && rm -rf /tmp/install_map_merge.sh /var/lib/apt/lists/*
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Project-local virtualenv with PyTorch (CPU build).

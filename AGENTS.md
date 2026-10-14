@@ -15,9 +15,6 @@ University project, inherited from a previous team; README is in German.
   running interpreter).
 - Pure-Python parts (`tb3_slam/utils.py`, `tools/`) run anywhere with numpy, e.g.
   `uv run --no-project --with numpy python tools/check_world_connectivity.py`.
-- Map merging uses `multirobot_map_merge` (m-explore-ros2), which has **no apt package**:
-  `tools/install_map_merge.sh` builds it at a pinned commit into `~/m-explore-ws`
-  (`/opt/m-explore-ws` in Docker); source that overlay before the project's `install/`.
 - Gitignored runtime dirs: `worlds/`, `results/`, `rl_data/`, `build/`, `install/`, `log/`.
 
 ## Commands (run from repo root, never from `src/`)
@@ -55,10 +52,10 @@ gz server (+ GUI unless headless) + one global `/clock` bridge → **per robot `
 (namespaces `ROBOT_NAMESPACES`, spawns from the world metadata, both stacks in parallel):
 spawn `burger_<ns>` + gz bridge + `cmd_vel_relay` → 2 s robot_state_publisher → 5 s
 Cartographer (`cartographer_node` + `cartographer_occupancy_grid_node`, launched directly, no
-RViz) → 6 s startup spin (4 s of TwistStamped on `/<ns>/cmd_vel`) → 10 s Nav2
+RViz) → 6 s startup spin (12.5 s at 0.5 rad/s of TwistStamped on `/<ns>/cmd_vel`, ~1 turn) → 10 s Nav2
 (`nav2_bringup/navigation_launch.py` under `PushRosNamespace`, default params rewritten per
-robot) → 20 s exploration. `episode_manager` starts immediately. After the robot stacks, `map_merge`
-(7 s) fuses `/r1/map` + `/r2/map` into the global `/map` (see *Map merging*).
+robot) → 20 s exploration. `episode_manager` starts immediately. `map_merger` fuses
+`/r1/map` + `/r2/map` into the global `/map` (see *Map merging*).
 `exploration_mode:=classic` runs one `frontier_explorer` per robot on its own map, `:=rl` runs
 the DQN for `r1` only (shared `rl_data/`), `:=none` brings up the bare stack (goals from
 outside). All interim until the allocator (#11) works on the merged map.
@@ -75,20 +72,25 @@ per robot into a `/tmp/slam_rl_robots_*/<ns>/` dir. Every robot has
   joined later without collisions. `<ns>/map` starts at that robot's spawn pose.
 To inspect a tree: `ros2 run tf2_ros tf2_echo r1/map r1/base_link --ros-args -r /tf:=/r1/tf -r /tf_static:=/r1/tf_static`.
 
-**Map merging** (#9, `sim_slam.launch.py::map_merge_stack`): `multirobot_map_merge` with
-`known_init_poses` = the spawns from the world metadata (`multi_robot.map_merge_params`,
-yaw 0, since `<ns>/map` starts at the spawn pose). Chosen over a hand-written node because
-the project's question is RL vs classical allocation, not map fusion; known poses make the
-package's pose estimation unnecessary. Overlapping cells are fused with a per-cell `max`
+**Map merging** (#9, `tb3_slam/map_merging.py` pure numpy + `map_merger.py` node, launched by
+`sim_slam.launch.py::map_merge_stack`): every `/<ns>/map` is placed by its grid origin plus
+the robot's spawn pose (`<ns>/map` starts at the spawn, yaw 0) onto one **fixed-extent** grid
+(world + 1 m margin, 0.05 m, frame `map`, origin never moves) and fused with a per-cell `max`
 (unknown −1 loses to anything, wall/uncertain beats free; 26–74 pass through), which keeps the
-cell semantics `frontier_utils` expects. The package publishes **no TF**, so static
-`map → <ns>/map` transforms (spawn offset) are launched next to it. Limitation: the offsets are
-fixed, so Cartographer drift between the robots is not corrected (fine for short 8/12 m
-episodes; state it in the paper). Fallback if the package stops building: a small numpy node
-with the same max-fusion rule and offsets.
+cell semantics `frontier_utils` expects. Published at 2 Hz, TRANSIENT_LOCAL. Static
+`map → <ns>/map` transforms (spawn offset) are launched next to it. Limitations: offsets are
+fixed, so Cartographer drift/rotation between the robots is not corrected (fine for short
+8/12 m episodes; state it in the paper).
+*Why not `multirobot_map_merge` (m-explore-ros2)?* Tried first: it works in pixel space, treats
+the pose translation as cells and puts the merged origin at the grid centre, ignoring each
+map's own origin (which Cartographer moves as the map grows) – the result is not in the `map`
+frame and walls double.
+*Startup spin:* the old 1.5 rad/s spin (17° per 5 Hz scan) made Cartographer's map frame
+tilt ~10° against the world, which breaks the yaw-0 assumption and ruins the merge; no spin
+leaves the free cells "uncertain". 0.5 rad/s for 12.5 s keeps the maps axis-aligned.
 
 **Data flow** (per robot unless noted)
-- `/<ns>/map` (OccupancyGrid from Cartographer) → that robot's explorer and `map_merge`;
+- `/<ns>/map` (OccupancyGrid from Cartographer) → that robot's explorer and `map_merger`;
   `/map` (merged, frame `map`) → `episode_manager` / coverage.
 - Nav2 actions used: `navigate_to_pose`, `compute_path_to_pose` (for ranking candidates).
 - `cmd_vel_relay`: Nav2 `/<ns>/cmd_vel_smoothed` (Twist) → `/<ns>/cmd_vel` (TwistStamped, Jazzy gz bridge).
@@ -240,8 +242,6 @@ GUI – no Gazebo client, no RViz). Files at repo root: `Dockerfile`,
   (TurtleBot3, `ros-gz`, Nav2, Cartographer, `tf-transformations`) installed via
   apt – it is **not** in the `package.xml` files. CPU-only torch in a venv at
   `<workspace>/.venv` (the launch file injects `python3.12/site-packages`).
-- `multirobot_map_merge` is built from source in the image (`tools/install_map_merge.sh`,
-  overlay at `/opt/m-explore-ws`, sourced by `docker/entrypoint.sh`).
 - Workspace lives at `/root/projects/slam_rl`; RL persistence goes to
   `SLAM_RL_DATA_DIR` (set by the entrypoints to `<workspace>/rl_data`).
 - Two compose services share the image: `dev` (interactive shell, mounts `src/`

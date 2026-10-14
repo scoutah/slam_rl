@@ -64,6 +64,49 @@ Visualization Manager:
         Value: /r2/map
       Use Timestamp: false
       Value: false
+    - Class: rviz_default_plugins/TF
+      Enabled: true
+      Name: TF (r1 + r2)
+      Frame Timeout: 15
+      Marker Scale: 0.5
+      Show Arrows: false
+      Show Axes: true
+      Show Names: true
+      Update Interval: 0
+      Value: true
+      Tree: {}
+      Frames:
+        All Enabled: true
+    - Alpha: 1
+      Class: rviz_default_plugins/LaserScan
+      Color: 0; 255; 0
+      Color Transformer: FlatColor
+      Enabled: true
+      Name: r1 scan
+      Size (m): 0.03
+      Style: Points
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Best Effort
+        Value: /r1/scan
+      Value: true
+    - Alpha: 1
+      Class: rviz_default_plugins/LaserScan
+      Color: 255; 160; 0
+      Color Transformer: FlatColor
+      Enabled: true
+      Name: r2 scan
+      Size (m): 0.03
+      Style: Points
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Best Effort
+        Value: /r2/scan
+      Value: true
     - Class: rviz_default_plugins/MarkerArray
       Enabled: true
       Name: r1 frontiers

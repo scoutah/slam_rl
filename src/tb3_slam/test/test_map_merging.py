@@ -29,11 +29,39 @@ def test_unknown_only_where_no_robot_knows():
     assert merged[2, 2] == UNKNOWN
 
 
-def test_wall_and_uncertain_beat_free_and_values_pass_through():
+def test_wall_beats_free_but_free_beats_uncertain_and_unknown():
+    # Priority: wall (100) > free (0) > uncertain (40) > unknown (-1).
     a = np.array([[0, 0, 0]], np.int8)
     b = np.array([[100, 40, UNKNOWN]], np.int8)
     merged = fuse_grids(_spec(), [(a, 0.0, 0.0, RES), (b, 0.0, 0.0, RES)])
-    assert merged[0, :3].tolist() == [100, 40, 0]
+    assert merged[0, :3].tolist() == [100, 0, 0]
+
+
+def test_free_is_not_overwritten_by_later_uncertain_or_unknown():
+    # A cell confirmed free must stay free when a robot later reports it grey/unknown.
+    free = np.array([[0]], np.int8)
+    first = fuse_grids(_spec(), [(free, 0.0, 0.0, RES)])
+    assert first[0, 0] == 0
+    uncertain = np.array([[50]], np.int8)
+    second = fuse_grids(_spec(), [(uncertain, 0.0, 0.0, RES)], base=first)
+    assert second[0, 0] == 0, 'uncertain must not overwrite confirmed free'
+    unknown = np.array([[UNKNOWN]], np.int8)
+    third = fuse_grids(_spec(), [(unknown, 0.0, 0.0, RES)], base=second)
+    assert third[0, 0] == 0, 'unknown must not overwrite confirmed free'
+
+
+def test_wall_still_overrides_previously_free_cell():
+    free = np.array([[0]], np.int8)
+    first = fuse_grids(_spec(), [(free, 0.0, 0.0, RES)])
+    wall = np.array([[100]], np.int8)
+    second = fuse_grids(_spec(), [(wall, 0.0, 0.0, RES)], base=first)
+    assert second[0, 0] == 100, 'a real wall must still override free'
+
+
+def test_base_shape_mismatch_is_rejected():
+    bad_base = np.full((3, 3), UNKNOWN, np.int8)
+    with pytest.raises(ValueError):
+        fuse_grids(_spec(4), [(np.zeros((2, 2), np.int8), 0.0, 0.0, RES)], base=bad_base)
 
 
 def test_origin_offset_shifts_by_whole_cells():

@@ -36,6 +36,9 @@ class MapMerger(Node):
         world_size = float(self.get_parameter('world_size').value)
         self._spec = merged_grid_spec(world_size)
         self._maps: dict[str, OccupancyGrid] = {}
+        # Persistent merged state: the fusion is stateful so a cell confirmed FREE
+        # once is not lost when Cartographer later reports it UNKNOWN/UNCERTAIN.
+        self._merged: np.ndarray | None = None
 
         # Cartographer's occupancy grid node latches its map (TRANSIENT_LOCAL).
         qos = QoSProfile(
@@ -75,10 +78,11 @@ class MapMerger(Node):
         if not layers:
             return
         try:
-            merged = fuse_grids(self._spec, layers)
+            merged = fuse_grids(self._spec, layers, base=self._merged)
         except ValueError as exc:
             self.get_logger().error(str(exc), throttle_duration_sec=10.0)
             return
+        self._merged = merged
 
         out = OccupancyGrid()
         out.header.stamp = self.get_clock().now().to_msg()

@@ -8,7 +8,8 @@ Results are written to a per-run CSV file in results/.
 Usage:
     python3 training_runner.py [--mode classic|rl] [--episodes N]
                                [--timeout SECONDS] [--threshold FLOAT]
-                               [--headless] [--world PATH] [--world-size METRES]
+                               [--headless] [--no-rviz] [--world PATH]
+                               [--world-size METRES]
 
 Examples:
     python3 training_runner.py --mode classic --episodes 20
@@ -185,6 +186,7 @@ def build_launch_cmd(
     threshold: float,
     timeout: float,
     headless: bool,
+    rviz: bool = True,
 ) -> list[str]:
     cmd = [
         'ros2', 'launch', 'tb3_slam', 'sim_slam.launch.py',
@@ -195,6 +197,8 @@ def build_launch_cmd(
     ]
     if headless:
         cmd.append('headless:=true')
+    elif not rviz:
+        cmd.append('rviz:=false')
     return cmd
 
 
@@ -287,6 +291,7 @@ def run(
     randomize_worlds: bool = False,
     save_worlds: bool = False,
     world_size: float | None = None,
+    rviz: bool = True,
 ) -> None:
     print(f'[runner] Starting episodic training: mode={mode}, episodes={n_episodes}')
     print(f'         threshold={threshold:.0%}, timeout={timeout:.0f}s, headless={headless}')
@@ -320,7 +325,7 @@ def run(
         env = os.environ.copy()
         env['SLAM_WORLD_FILE'] = str(world_file)
 
-        launch_cmd = build_launch_cmd(mode, EPISODE_FILE, threshold, timeout, headless)
+        launch_cmd = build_launch_cmd(mode, EPISODE_FILE, threshold, timeout, headless, rviz)
         print(f'[runner] Launching: {" ".join(launch_cmd)}')
 
         ep_start = time.time()
@@ -375,6 +380,8 @@ def main() -> None:
                         help='Coverage threshold to end episode (default: 0.99)')
     parser.add_argument('--headless', action='store_true',
                         help='Skip Gazebo GUI client')
+    parser.add_argument('--no-rviz', action='store_true',
+                        help='Do not open RViz with the Gazebo GUI (ignored with --headless)')
     parser.add_argument('--world', type=str, default=None,
                         help='Path to an existing .sdf world file (skip generation)')
     parser.add_argument('--world-size', type=float, default=None,
@@ -412,6 +419,7 @@ def main() -> None:
             randomize_worlds=args.randomize_worlds,
             save_worlds=args.save_worlds,
             world_size=args.world_size,
+            rviz=not args.no_rviz,
         )
     except KeyboardInterrupt:
         print('\n[runner] Interrupted by user.')

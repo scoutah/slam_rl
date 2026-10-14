@@ -31,7 +31,11 @@ Design changes vs the first attempt (documented in AGENTS.md *Map merging*):
       episode, also for 12 m worlds and several random worlds (drift is not corrected).
 - [ ] Coverage was observed fluctuating in earlier (pre-fix) runs; confirm it is monotone-ish
       now over a full episode (`/episode/coverage`).
-- [ ] View the merged map in RViz (headless Docker could only dump it to PNG).
+- [ ] View the merged map in RViz (headless Docker could only dump it to PNG). Without
+      `--headless`, `sim_slam.launch.py` / `training_runner.py` now open RViz with
+      `src/tb3_slam/rviz/sim_slam.rviz` (fixed frame `map`: merged `/map` on, `/r1/map` and
+      `/r2/map` available but off, frontier markers). `rviz:=false` / `--no-rviz` disables it.
+      The launch condition was verified, the RViz window itself was not (no display in Docker).
 - [ ] #10: episode timeout for 8/12 m worlds is still undecided; the `coverage` CSV column
       is empty for `timeout`/`stuck` rows (pre-existing).
 - [ ] #11: explorers still run per robot on their own maps; goals on the merged map need the

@@ -21,7 +21,7 @@ University project, inherited from a previous team; README is in German.
 
 ```bash
 colcon build && source install/setup.bash          # re-source after every build
-ros2 launch tb3_slam sim_slam.launch.py exploration_mode:=classic   # or :=rl, headless:=true, world_size:=12
+ros2 launch tb3_slam sim_slam.launch.py exploration_mode:=classic   # or :=rl, headless:=true, rviz:=false, world_size:=12
 python3 training_runner.py --mode classic --episodes 20 --headless --randomize-worlds --world-size 12
 python3 training_runner.py --world worlds/<id>.sdf --episodes 5     # reuse a saved world
 colcon test --packages-select tb3_slam && colcon test-result --verbose
@@ -30,7 +30,7 @@ python3 tools/check_world_connectivity.py           # offline generator check, b
 ```
 
 `training_runner.py` options: `--mode classic|rl`, `--episodes`, `--timeout` (600 s),
-`--threshold` (0.99), `--headless`, `--world PATH`, `--world-size 8|12` (edge length of
+`--threshold` (0.99), `--headless`, `--no-rviz`, `--world PATH`, `--world-size 8|12` (edge length of
 generated worlds, default 8; not allowed with `--world` alone), `--randomize-worlds` (otherwise ONE world
 is reused for all episodes), `--save-worlds` (persist to `worlds/`). The results CSV has a
 `world_size` column (read from the world's metadata sidecar).

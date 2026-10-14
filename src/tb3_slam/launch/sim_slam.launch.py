@@ -392,6 +392,24 @@ def generate_launch_description():
         ])),
     )
 
+    # RViz displays like RobotModel can only subscribe to the global /tf, but
+    # every robot keeps its transforms on /<ns>/tf. This relay mirrors the
+    # (prefixed, collision-free) per-robot trees onto /tf for RViz only; it is
+    # gated on the same condition as RViz and never feeds a robot stack.
+    tf_relay_node = Node(
+        package='tb3_slam',
+        executable='tf_relay',
+        name='tf_relay',
+        parameters=[{
+            'use_sim_time': use_sim_time,
+            'namespaces': list(ROBOT_NAMESPACES),
+        }],
+        output='log',
+        condition=IfCondition(PythonExpression([
+            "'", rviz, "'.lower() == 'true' and '", headless, "'.lower() != 'true'",
+        ])),
+    )
+
     set_env_vars_resources = AppendEnvironmentVariable(
         'GZ_SIM_RESOURCE_PATH',
         os.path.join(get_package_share_directory('turtlebot3_gazebo'), 'models'),
@@ -459,6 +477,7 @@ def generate_launch_description():
         OpaqueFunction(function=launch_world),
         gzclient_cmd,
         rviz_node,
+        tf_relay_node,
         episode_manager,
         exploration_delayed,
     ])

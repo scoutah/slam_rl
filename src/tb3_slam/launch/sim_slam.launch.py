@@ -15,9 +15,9 @@ from launch.actions import (
     SetEnvironmentVariable,
     TimerAction,
 )
-from launch.conditions import UnlessCondition
+from launch.conditions import IfCondition, UnlessCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import LaunchConfiguration
+from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node, PushRosNamespace
 from tb3_slam.multi_robot import (
     bridge_config,
@@ -324,6 +324,8 @@ def explorer_node(ns: str, package: str, executable: str, name: str,
 def generate_launch_description():
     use_sim_time = LaunchConfiguration('use_sim_time', default='true')
     headless = LaunchConfiguration('headless', default='false')
+    # RViz opens with the Gazebo GUI; rviz:=false switches it off, headless never opens it.
+    rviz = LaunchConfiguration('rviz', default='true')
     exploration_mode = LaunchConfiguration('exploration_mode', default='classic')
     episode_file = LaunchConfiguration('episode_file', default='/tmp/slam_episode_done')
     coverage_threshold = LaunchConfiguration('coverage_threshold', default='0.99')
@@ -375,6 +377,19 @@ def generate_launch_description():
         ),
         launch_arguments={'gz_args': '-g -v2 ', 'use_sim_time': use_sim_time}.items(),
         condition=UnlessCondition(headless),
+    )
+
+    rviz_node = Node(
+        package='rviz2',
+        executable='rviz2',
+        name='rviz2',
+        arguments=['-d', os.path.join(
+            get_package_share_directory('tb3_slam'), 'rviz', 'sim_slam.rviz')],
+        parameters=[{'use_sim_time': use_sim_time}],
+        output='log',
+        condition=IfCondition(PythonExpression([
+            "'", rviz, "'.lower() == 'true' and '", headless, "'.lower() != 'true'",
+        ])),
     )
 
     set_env_vars_resources = AppendEnvironmentVariable(
@@ -443,6 +458,7 @@ def generate_launch_description():
         inject_venv,
         OpaqueFunction(function=launch_world),
         gzclient_cmd,
+        rviz_node,
         episode_manager,
         exploration_delayed,
     ])

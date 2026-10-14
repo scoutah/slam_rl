@@ -10,11 +10,6 @@ WORKSPACE="${WORKSPACE:-/root/projects/slam_rl}"
 
 # ROS 2 base + our built workspace overlay.
 source /opt/ros/jazzy/setup.bash
-# multirobot_map_merge overlay (built in the image, see tools/install_map_merge.sh).
-M_EXPLORE_WS="${M_EXPLORE_WS:-/opt/m-explore-ws}"
-if [ -f "${M_EXPLORE_WS}/install/setup.bash" ]; then
-    source "${M_EXPLORE_WS}/install/setup.bash"
-fi
 if [ -f "${WORKSPACE}/install/setup.bash" ]; then
     source "${WORKSPACE}/install/setup.bash"
 fi

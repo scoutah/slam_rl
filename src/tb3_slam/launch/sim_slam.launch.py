@@ -22,7 +22,6 @@ from launch_ros.actions import Node, PushRosNamespace
 from tb3_slam.multi_robot import (
     bridge_config,
     frame,
-    map_merge_params,
     MERGED_MAP_FRAME,
     namespace_cartographer_lua,
     namespace_model_sdf,
@@ -35,6 +34,7 @@ from tb3_slam.utils import (
     DEFAULT_WORLD_SIZE,
     generate_random_world,
     load_spawns,
+    load_world_size,
     WORLD_META_FILE,
     world_meta_path,
 )
@@ -202,10 +202,10 @@ def robot_stack(ns: str, spawn: tuple[float, float], configs: dict[str, str],
         cmd=[
             'ros2', 'topic', 'pub',
             '--rate', '10',
-            '--times', '40',
+            '--times', '125',
             topic(ns, 'cmd_vel'),
             'geometry_msgs/msg/TwistStamped',
-            f"{{header: {{frame_id: {frame(ns, 'base_link')}}}, twist: {{angular: {{z: 1.5}}}}}}",
+            f"{{header: {{frame_id: {frame(ns, 'base_link')}}}, twist: {{angular: {{z: 0.5}}}}}}",
         ],
         output='log',
     )
@@ -253,32 +253,24 @@ def robot_stack(ns: str, spawn: tuple[float, float], configs: dict[str, str],
     ]
 
 
-def map_merge_stack(spawns: list[tuple[float, float]], use_sim_time) -> list:
+def map_merge_stack(spawns: list[tuple[float, float]], world_size: float,
+                    use_sim_time) -> list:
     """Merge the robots' maps into one global ``/map`` (issue #9).
 
-    ``multirobot_map_merge`` (built from source, see tools/install_map_merge.sh)
-    runs with known initial poses = the spawns and fuses the grids with a
-    per-cell max, which keeps the 0-25 / 26-74 / 75-100 / -1 semantics that
-    frontier_utils relies on. It publishes no TF, so static ``map -> <ns>/map``
-    transforms join the robots' trees to the merged frame.
+    ``map_merger`` places every ``/<ns>/map`` by its origin plus the spawn pose
+    on a fixed-extent grid and fuses with a per-cell max (keeps the 0-25 /
+    26-74 / 75-100 / -1 semantics frontier_utils relies on). Static
+    ``map -> <ns>/map`` transforms join the robots' TF trees to the merged frame.
     """
     merge = Node(
-        package='multirobot_map_merge',
-        executable='map_merge',
-        name='map_merge',
+        package='tb3_slam',
+        executable='map_merger',
+        name='map_merger',
         output='log',
         parameters=[{
             'use_sim_time': use_sim_time,
-            'known_init_poses': True,
-            'robot_map_topic': 'map',
-            'robot_map_updates_topic': 'map_updates',
-            'merged_map_topic': 'map',
-            'world_frame': MERGED_MAP_FRAME,
-            'merging_rate': 4.0,
-            # Default is one discovery pass per 20 s; the maps appear ~5 s
-            # after launch and the merged map should follow within seconds.
-            'discovery_rate': 0.5,
-            **map_merge_params(spawns),
+            'spawns': [float(v) for spawn in spawns for v in spawn],
+            'world_size': float(world_size),
         }],
     )
     static_tfs = [
@@ -297,9 +289,7 @@ def map_merge_stack(spawns: list[tuple[float, float]], use_sim_time) -> list:
         )
         for ns, (x, y) in zip(ROBOT_NAMESPACES, spawns)
     ]
-    # Cartographer starts at 5 s; the first /<ns>/map follows its first
-    # publish period, so merging needs no earlier start.
-    return [*static_tfs, TimerAction(period=7.0, actions=[merge])]
+    return [*static_tfs, merge]
 
 
 def explorer_node(ns: str, package: str, executable: str, name: str,
@@ -372,7 +362,10 @@ def generate_launch_description():
         robots = []
         for ns, spawn in zip(ROBOT_NAMESPACES, spawns):
             robots += robot_stack(ns, spawn, write_robot_configs(ns, config_dir), use_sim_time)
-        return [gzserver_cmd, clock_bridge, *robots, *map_merge_stack(spawns, use_sim_time)]
+        return [
+            gzserver_cmd, clock_bridge, *robots,
+            *map_merge_stack(spawns, load_world_size(WORLD_META_FILE), use_sim_time),
+        ]
 
     # ── Gazebo GUI ──────────────────────────────────────────────────────
 

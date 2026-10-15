@@ -292,32 +292,26 @@ def map_merge_stack(spawns: list[tuple[float, float]], world_size: float,
     return [*static_tfs, merge]
 
 
-def explorer_node(ns: str, package: str, executable: str, name: str,
-                  use_sim_time, coverage_threshold, episode_file) -> Node:
-    """Single-robot explorer running inside namespace ns on that robot's map.
+def coordinator_node(allocator, use_sim_time, coverage_threshold, episode_file) -> Node:
+    """Centralised allocator-driven coordinator (issue #11).
 
-    Interim until the allocator (#11) assigns goals on the merged map (#9);
-    the explorers still use their own robot's map, the episode end does not.
+    Runs un-namespaced: it reads the merged global ``/map`` and each robot's
+    pose, then dispatches goals to the per-robot ``/<ns>/navigate_to_pose``
+    actions. ``allocator`` is the strategy name behind the shared interface
+    (``classic`` or ``rl``) — the only thing that differs between the two
+    user-facing methods; everything else in the stack is identical.
     """
     return Node(
-        package=package,
-        executable=executable,
-        name=name,
-        namespace=ns,
+        package='tb3_slam',
+        executable='coordinator',
+        name='coordinator',
         ros_arguments=['--log-level', 'info'],
         parameters=[{
             'use_sim_time': use_sim_time,
+            'allocator': allocator,
             'coverage_threshold': coverage_threshold,
             'episode_file': episode_file,
-            'map_frame': frame(ns, 'map'),
-            'base_frame': frame(ns, 'base_link'),
         }],
-        # The nodes use absolute names; resolve them inside the namespace.
-        remappings=TF_REMAPS + [
-            ('/map', 'map'),
-            ('/cmd_vel', 'cmd_vel'),
-            ('/frontiers_viz', 'frontiers_viz'),
-        ],
     )
 
 
@@ -437,22 +431,21 @@ def generate_launch_description():
 
     def launch_explorers(context):
         mode = exploration_mode.perform(context)
-        if mode == 'classic':
-            return [
-                explorer_node(ns, 'tb3_exploration', 'frontier_explorer', 'frontier_explorer',
-                              use_sim_time, coverage_threshold, episode_file)
-                for ns in ROBOT_NAMESPACES
-            ]
-        if mode == 'rl':
-            # The DQN persists to one shared rl_data/ dir, so only robot 1 runs
-            # it until the centralised allocator (#13) replaces it.
-            return [explorer_node(ROBOT_NAMESPACES[0], 'tb3_reinforced_exploration',
-                                  'reinforced_exploration', 'rl_agent',
-                                  use_sim_time, coverage_threshold, episode_file)]
+        # `classic` and `rl` are the user-facing methods. Both now run the
+        # single centralised coordinator (issue #11) on the merged map; the
+        # mode only selects which allocator sits behind the shared interface.
+        # The old per-robot explorers are gone — the method difference lives
+        # entirely in the allocator, so everything else is identical.
+        if mode in ('classic', 'rl'):
+            return [coordinator_node(
+                mode, use_sim_time, coverage_threshold, episode_file,
+            )]
         if mode == 'none':
             # Bare stack: goals come from outside (manual tests, allocator).
             return []
-        raise ValueError(f"exploration_mode must be 'classic', 'rl' or 'none' (got {mode!r})")
+        raise ValueError(
+            f"exploration_mode must be 'classic', 'rl' or 'none' (got {mode!r})"
+        )
 
     # The RL agent needs PyTorch which lives in the project-local .venv.
     # We inject the venv's site-packages into PYTHONPATH so the system Python

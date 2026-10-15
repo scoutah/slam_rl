@@ -58,9 +58,14 @@ RViz) → 6 s startup spin (12.5 s at 0.5 rad/s of TwistStamped on `/<ns>/cmd_ve
 (`nav2_bringup/navigation_launch.py` under `PushRosNamespace`, default params rewritten per
 robot) → 20 s exploration. `episode_manager` starts immediately. `map_merger` fuses
 `/r1/map` + `/r2/map` into the global `/map` (see *Map merging*).
-`exploration_mode:=classic` runs one `frontier_explorer` per robot on its own map, `:=rl` runs
-the DQN for `r1` only (shared `rl_data/`), `:=none` brings up the bare stack (goals from
-outside). All interim until the allocator (#11) works on the merged map.
+`exploration_mode:=classic` and `:=rl` are the two user-facing methods; **both** now run the
+single centralised coordinator node (issue #11) on the merged `/map`, and the mode only selects
+which allocator sits behind the shared interface (`classic` → cost-utility, `rl` → pointwise
+DQN). There is no public `coordinator`/`allocator` argument — the mapping is implicit so the old
+`--mode classic|rl` / `exploration_mode:=classic|rl` interface keeps working unchanged. `:=none`
+brings up the bare stack (goals from outside). The old per-robot `frontier_explorer` /
+`reinforced_exploration` nodes are no longer launched; the method difference lives entirely in
+the allocator.
 
 **Namespacing** (`tb3_slam/multi_robot.py`, pure Python, unit-tested): at launch the upstream
 burger `model.sdf`, bridge yaml, `turtlebot3_lds_2d.lua` and `nav2_params.yaml` are rewritten
@@ -156,6 +161,32 @@ Pointwise DQN: each reachable centroid → features `[group_size/100, path_len/1
 replay buffer only when the episode succeeds (stuck/timeout episodes are discarded).
 Model/replay/meta persisted to **hard-coded** `~/projects/slam_rl/rl_data/`. No blacklist of
 failed goals; spins via `/cmd_vel` when idle 15 s.
+
+### Allocator interface + coordinator (`tb3_slam`, issue #11)
+
+The `coordinator` mode decouples goal *selection* from goal *dispatch* so the classical and RL
+methods differ **only** in the allocator behind one shared interface. Pure-Python, ROS-free,
+unit-tested pieces (`src/tb3_slam/test/test_allocator.py`):
+- `allocator.py` — the `Allocator` protocol `allocate(merged_map, [RobotState]) -> {ns: Goal|None}`,
+  the `RobotState`/`Goal`/`FrontierCandidate` dataclasses, and `candidates_for_robot()` (wraps
+  `frontier_utils.centroids_from_map_debug` seeded from each robot's cell on the **merged** map,
+  so every allocator sees identical candidates). A `Goal` of `None` means "leave this robot as is".
+- `nearest_frontier_allocator.py` — `NearestFrontierAllocator`, the dummy: each idle robot gets
+  its own Euclidean-nearest centroid (no deconfliction, no Nav2 cost). Validates the plumbing.
+- `allocator_registry.py` — `make_allocator(name)` maps the implicit mode name to a class
+  (`dummy`/`nearest` → the stub; `classic`/`rl` → the method behind `exploration_mode`). The
+  classical (#12) and RL (#13) allocators register under `classic`/`rl` here (both currently
+  fall back to the dummy until they land).
+
+`coordinator.py` is the single ROS node (un-namespaced, launched by `launch_explorers` for
+`exploration_mode:=classic`/`:=rl`). It owns all ROS I/O: subscribes to the merged `/map`
+(TRANSIENT_LOCAL), looks up each robot's pose via `/<ns>/tf` → `map`, calls the allocator every
+`decision_period` (2 s), and dispatches each goal to `/<ns>/navigate_to_pose`. Per-robot goal
+supervision mirrors the classic explorer (cancel after `goal_timeout` 45 s, or
+`no_progress_timeout` 8 s without `progress_step` 0.1 m; a "SUCCEEDED" that moved < `min_progress`
+0.2 m is logged as a non-move). Busy robots are left alone unless the allocator re-tasks them
+(then their current goal is cancelled first). Coverage/episode-end run off the merged `/map` as
+before. An allocator exception is caught and logged, never crashing the node.
 
 ## World generator (`tb3_slam/utils.py::generate_random_world`)
 

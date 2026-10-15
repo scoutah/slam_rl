@@ -125,13 +125,15 @@ python3 training_runner.py --help
 |---|---|---|
 | `--mode` | `classic` | Exploration-Modus: `classic` oder `rl` |
 | `--episodes` | `10` | Anzahl Episoden |
-| `--timeout` | `600` | Max. Episodendauer in Sekunden |
 | `--threshold` | `0.99` | Coverage-Schwellwert für Episodenende |
 | `--headless` | `false` | Gazebo-GUI deaktivieren |
 | `--world` | – | Pfad zu einer bestehenden `.sdf`-Welt (überspringt die Generierung) |
 | `--world-size` | `8` | Kantenlänge generierter quadratischer Welten in m; nur `8` (8 × 8 m) oder `12` (12 × 12 m) |
 | `--randomize-worlds` | `false` | Pro Episode eine neue Zufallswelt generieren |
 | `--save-worlds` | `false` | Generierte Welten in `worlds/` ablegen (Standard: `/tmp/`) |
+
+> **Hinweis:** Das Episoden-Timeout ist nicht konfigurierbar; es wird aus der Weltgröße
+> abgeleitet (600 s bei 8 × 8 m, 900 s bei 12 × 12 m).
 
 ### Coverage überwachen (separates Terminal)
 

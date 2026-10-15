@@ -7,9 +7,12 @@ Results are written to a per-run CSV file in results/.
 
 Usage:
     python3 training_runner.py [--mode classic|rl] [--episodes N]
-                               [--timeout SECONDS] [--threshold FLOAT]
+                               [--threshold FLOAT]
                                [--headless] [--no-rviz] [--world PATH]
                                [--world-size METRES]
+
+The episode timeout is derived from the world size (issue #10) and is not
+configurable from the command line.
 
 Examples:
     python3 training_runner.py --mode classic --episodes 20
@@ -184,16 +187,16 @@ def build_launch_cmd(
     mode: str,
     episode_file: Path,
     threshold: float,
-    timeout: float,
     headless: bool,
     rviz: bool = True,
 ) -> list[str]:
+    # The episode timeout is derived from the world size by episode_manager
+    # (issue #10) and is deliberately not configurable here.
     cmd = [
         'ros2', 'launch', 'tb3_slam', 'sim_slam.launch.py',
         f'exploration_mode:={mode}',
         f'episode_file:={episode_file}',
         f'coverage_threshold:={threshold}',
-        f'max_episode_duration:={timeout}',
     ]
     if headless:
         cmd.append('headless:=true')
@@ -283,7 +286,6 @@ def _kill_stale_ros_processes() -> None:
 def run(
     mode: str,
     n_episodes: int,
-    timeout: float,
     threshold: float,
     headless: bool,
     world_file: Path,
@@ -294,7 +296,8 @@ def run(
     rviz: bool = True,
 ) -> None:
     print(f'[runner] Starting episodic training: mode={mode}, episodes={n_episodes}')
-    print(f'         threshold={threshold:.0%}, timeout={timeout:.0f}s, headless={headless}')
+    print(f'         threshold={threshold:.0%}, timeout=auto (world size), '
+          f'headless={headless}')
     print(f'         world    → {world_file}' + (' (new each episode)' if randomize_worlds else ''))
     print(f'         world size: {read_world_size(world_file) or "unknown"} m')
     print(f'         results  → {result_file}')
@@ -325,7 +328,7 @@ def run(
         env = os.environ.copy()
         env['SLAM_WORLD_FILE'] = str(world_file)
 
-        launch_cmd = build_launch_cmd(mode, EPISODE_FILE, threshold, timeout, headless, rviz)
+        launch_cmd = build_launch_cmd(mode, EPISODE_FILE, threshold, headless, rviz)
         print(f'[runner] Launching: {" ".join(launch_cmd)}')
 
         ep_start = time.time()
@@ -374,8 +377,6 @@ def main() -> None:
                         help='Exploration strategy (default: classic)')
     parser.add_argument('--episodes', type=int, default=10,
                         help='Number of episodes to run (default: 10)')
-    parser.add_argument('--timeout', type=float, default=600.0,
-                        help='Max episode duration in seconds (default: 600)')
     parser.add_argument('--threshold', type=float, default=0.99,
                         help='Coverage threshold to end episode (default: 0.99)')
     parser.add_argument('--headless', action='store_true',
@@ -411,7 +412,6 @@ def main() -> None:
         run(
             mode=args.mode,
             n_episodes=args.episodes,
-            timeout=args.timeout,
             threshold=args.threshold,
             headless=args.headless,
             world_file=world_file,

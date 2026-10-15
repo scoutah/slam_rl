@@ -6,7 +6,11 @@ from nav_msgs.msg import OccupancyGrid
 from rclpy.node import Node
 from std_msgs.msg import Float32
 
-from tb3_slam.coverage_monitor import check_coverage, load_expected_cells
+from tb3_slam.coverage_monitor import (
+    check_coverage,
+    load_episode_timeout,
+    load_expected_cells,
+)
 
 
 class EpisodeManager(Node):
@@ -27,7 +31,6 @@ class EpisodeManager(Node):
 
         self.declare_parameter('coverage_threshold', 0.99)
         self.declare_parameter('episode_file', '/tmp/slam_episode_done')
-        self.declare_parameter('max_episode_duration', 600.0)  # seconds
         # Ignore /map messages for this many seconds after launch. A previous
         # episode's cartographer that survives SIGINT keeps publishing the old
         # (nearly complete) map on /map with TRANSIENT_LOCAL QoS, which would
@@ -40,7 +43,7 @@ class EpisodeManager(Node):
 
         self.threshold: float = self.get_parameter('coverage_threshold').value
         self.episode_file: str = self.get_parameter('episode_file').value
-        self.max_duration: float = self.get_parameter('max_episode_duration').value
+        self.max_duration: float = load_episode_timeout()
         self.startup_grace_s: float = self.get_parameter('startup_grace_s').value
         self._stuck_timeout: float = self.get_parameter('stuck_timeout_s').value
         self._stuck_min_delta: float = self.get_parameter('stuck_min_delta').value

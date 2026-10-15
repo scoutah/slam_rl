@@ -329,7 +329,6 @@ def generate_launch_description():
     exploration_mode = LaunchConfiguration('exploration_mode', default='classic')
     episode_file = LaunchConfiguration('episode_file', default='/tmp/slam_episode_done')
     coverage_threshold = LaunchConfiguration('coverage_threshold', default='0.99')
-    max_episode_duration = LaunchConfiguration('max_episode_duration', default='600.0')
     world_size = LaunchConfiguration('world_size', default=str(DEFAULT_WORLD_SIZE))
 
     ros_gz_sim = get_package_share_directory('ros_gz_sim')
@@ -416,7 +415,10 @@ def generate_launch_description():
     )
 
     # ── Episode manager ──────────────────────────────────────────────────
-    # Runs on the merged global /map published by map_merge_stack().
+    # ── Episode manager ──────────────────────────────────────────────────
+    # Runs on the merged global /map published by map_merge_stack(). The
+    # episode timeout is derived from the world size by the node itself
+    # (issue #10) and is not configurable here.
 
     episode_manager = Node(
         package='tb3_slam',
@@ -427,7 +429,6 @@ def generate_launch_description():
             'use_sim_time': use_sim_time,
             'episode_file': episode_file,
             'coverage_threshold': coverage_threshold,
-            'max_episode_duration': max_episode_duration,
         }],
     )
 

@@ -29,11 +29,13 @@ pkill -9 -f gz                                        # when Gazebo survives Ctr
 python3 tools/check_world_connectivity.py           # offline generator check, both sizes (no ROS)
 ```
 
-`training_runner.py` options: `--mode classic|rl`, `--episodes`, `--timeout` (600 s),
+`training_runner.py` options: `--mode classic|rl`, `--episodes`,
 `--threshold` (0.99), `--headless`, `--no-rviz`, `--world PATH`, `--world-size 8|12` (edge length of
 generated worlds, default 8; not allowed with `--world` alone), `--randomize-worlds` (otherwise ONE world
 is reused for all episodes), `--save-worlds` (persist to `worlds/`). The results CSV has a
-`world_size` column (read from the world's metadata sidecar).
+`world_size` column (read from the world's metadata sidecar). The episode timeout is **not**
+configurable: it is derived from the world size (`coverage_monitor.timeout_for_world_size`,
+600 s for 8 × 8 m, 900 s for 12 × 12 m) so larger worlds get a larger budget (#10).
 
 ## Architecture
 
@@ -109,8 +111,9 @@ leaves the free cells "uncertain". 0.5 rad/s for 12.5 s keeps the maps axis-alig
 - Results: `results/<dd-mm-yyyy>-<mode>-<runid>.csv` (`;`-separated).
 
 **Episode end** (`episode_manager.py`): coverage ≥ threshold, or coverage gained
-< 0.5 % within 90 s (`stuck`), or 600 s wall clock. First 15 s of `/map` are ignored
-(stale TRANSIENT_LOCAL map from a previous Cartographer).
+< 0.5 % within 90 s (`stuck`), or a wall-clock timeout derived from the world size
+(600 s for 8 × 8 m, 900 s for 12 × 12 m; `coverage_monitor.timeout_for_world_size`, #10).
+First 15 s of `/map` are ignored (stale TRANSIENT_LOCAL map from a previous Cartographer).
 
 **Coverage** = known-free cells (value 0–25) / expected free cells from wall-area
 geometry, capped at 1.0.
@@ -183,7 +186,8 @@ Nothing in Cartographer (`turtlebot3_lds_2d.lua`, unbounded submaps) or Nav2 def
 
 **Study sizes (Studienbericht 2): 8 × 8 m (64 m²) and 12 × 12 m (144 m²).** Verified fully
 connected with `check_world_connectivity.py --world-size 8 12` (clearances 0.22–0.40 m).
-The episode timeout for these sizes is decided in #10 / #15 (600 s was tuned for 5 × 5 m).
+The episode timeout is derived from the world size (`coverage_monitor.timeout_for_world_size`,
+600 s for 8 × 8 m, 900 s for 12 × 12 m; #10).
 
 **Spawns (two robots, #6):** derived deterministically from `world_size` by `spawn_poses()`
 in utils.py – side by side at the same entry, `SPAWN_SEPARATION` (1.0 m) apart, mirrored
@@ -199,7 +203,7 @@ robots' clearance discs overlap.
 
 1. **Explorers still use per-robot maps**: the merged `/map` drives coverage and episode end
    (#9/#10), but frontier detection and goal selection run per robot until the allocator
-   (#11) works on the merged map. The episode timeout for large worlds is still open (#10).
+   (#11) works on the merged map.
 
 ## Studienbericht 2 – multi-robot exploration
 

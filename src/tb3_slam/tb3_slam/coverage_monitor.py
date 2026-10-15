@@ -7,14 +7,35 @@ The expected cell count is pre-calculated by generate_random_world() and stored 
 WORLD_META_FILE so nodes can read it regardless of how they are launched.
 """
 import json
-from pathlib import Path
 
 import numpy as np
 from nav_msgs.msg import OccupancyGrid
 
-from tb3_slam.utils import WORLD_META_FILE
+from tb3_slam.utils import load_world_size, WORLD_META_FILE
 
 DEFAULT_COVERAGE_THRESHOLD: float = 0.99
+
+EPISODE_TIMEOUT_BY_WORLD_SIZE: dict[float, float] = {
+    8.0: 600.0,
+    12.0: 900.0,
+}
+_TIMEOUT_PER_AREA_S: float = EPISODE_TIMEOUT_BY_WORLD_SIZE[8.0] / (8.0 * 8.0)
+
+
+def timeout_for_world_size(world_size: float) -> float:
+    """Episode wall-clock timeout (seconds) appropriate for a square world.
+
+    Uses the tuned per-size budget for the study sizes (8, 12) and falls back to
+    an area-proportional estimate for any other size.
+    """
+    if world_size in EPISODE_TIMEOUT_BY_WORLD_SIZE:
+        return EPISODE_TIMEOUT_BY_WORLD_SIZE[world_size]
+    return _TIMEOUT_PER_AREA_S * float(world_size) * float(world_size)
+
+
+def load_episode_timeout() -> float:
+    """Episode timeout for the world described by the shared metadata file."""
+    return timeout_for_world_size(load_world_size(WORLD_META_FILE))
 
 
 def load_expected_cells() -> int | None:

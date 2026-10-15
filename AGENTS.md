@@ -206,18 +206,28 @@ robots' clearance discs overlap.
 ### Why
 
 On 5 × 5 m worlds with one robot, nearest-frontier is already near-optimal, so there is no
-room to tell whether RL beats a classical allocator. Larger, room-like worlds explored by
-two robots create coordination choices where a smarter allocator can matter. The graded
-deliverable is a paper of ~8000 words, so scope stays tight: anything that does not serve
-the research question is out of scope. The project is standalone – no single-robot baseline.
+room to tell whether RL helps. Larger, room-like worlds explored by two robots create
+coordination choices where a smarter allocator can matter. The interesting question is not
+just whether RL beats a classical allocator on the size it was trained on, but whether a
+*learned* allocator keeps that behaviour on a world geometry it never saw during training,
+whereas a classical allocator has no learned parameters and is generalisation-invariant by
+construction. The graded deliverable is a paper of ~8000 words, so scope stays tight:
+anything that does not serve the research question is out of scope. The project is
+standalone – no single-robot baseline.
 
 ### Research question
 
-> In two-robot exploration of large, room-like worlds, does an RL-based frontier allocator
-> outperform a good classical allocator?
+> How well does an RL-based multi-robot exploration strategy generalise to unknown
+> geometries compared to a classical exploration strategy?
 
-Two methods (classical vs RL), two robots, two map sizes – 8 × 8 m and 12 × 12 m (map size
-is the only independent variable besides method), one metric set.
+Two methods (classical vs RL), two robots, two map sizes. **The RL allocator is trained only
+on 8 × 8 m worlds**; both methods are then evaluated on **8 × 8 m (in-distribution, the
+training size)** and on **12 × 12 m (out-of-distribution, unseen geometry)**. World size is
+the only independent variable besides method; robot count stays constant at two. The
+classical allocator is the generalisation-invariant reference (no learned parameters,
+identical logic on both sizes). The quantity of interest is the **RL/classic ratio per world
+size and how it changes from 8 × 8 to 12 × 12**, not absolute completion times (which are not
+comparable across sizes).
 
 ### The system
 
@@ -227,9 +237,12 @@ are merged into one global map on which frontier detection, coverage and episode
 single allocator node sees the merged map and both robots' poses and assigns a frontier goal
 to each robot through a shared interface `(merged_map, poses) -> (goal_r1, goal_r2)`; the only
 difference between the two methods is the allocator behind that interface – a cost-utility
-classical allocator and a centralised pointwise-DQN allocator. Both methods run on identical
-worlds, frontier detection, Nav2 config, episode-end rules and metrics; evaluation compares
-time to coverage, stuck/timeout rate and distance travelled across many episodes.
+classical allocator and a centralised pointwise-DQN allocator. For the RL allocator to be
+transferable to the larger world at all, its per-frontier features must be **size-invariant**
+(relative/normalised, not absolute 8 × 8 coordinates). Both methods run on identical worlds,
+frontier detection, Nav2 config, episode-end rules and metrics; evaluation compares time to
+coverage, stuck/timeout rate, distance travelled and redundancy (doubly-covered area) across
+many episodes, reported in-distribution (8 × 8) vs out-of-distribution (12 × 12).
 
 ## Docker (headless)
 

@@ -20,11 +20,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import math
+import os
 from pathlib import Path
 
 from action_msgs.msg import GoalStatus
 from geometry_msgs.msg import PoseStamped
-from nav2_msgs.action import NavigateToPose
+from nav2_msgs.action import ComputePathToPose, NavigateToPose
 from nav_msgs.msg import OccupancyGrid
 import rclpy
 from rclpy.action import ActionClient
@@ -32,7 +33,7 @@ from rclpy.action.client import ClientGoalHandle
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from rclpy.task import Future
-from tb3_slam.allocator import Goal, RobotState
+from tb3_slam.allocator import AllocationContext, Goal, RobotState
 from tb3_slam.allocator_registry import make_allocator
 from tb3_slam.coverage_monitor import (
     check_coverage,
@@ -41,7 +42,6 @@ from tb3_slam.coverage_monitor import (
 )
 from tb3_slam.multi_robot import frame, MERGED_MAP_FRAME, ROBOT_NAMESPACES, topic
 from tf2_ros import Buffer, TransformListener
-import tf_transformations
 
 
 @dataclass
@@ -51,6 +51,7 @@ class _RobotIO:
     ns: str
     base_frame: str
     nav_client: ActionClient
+    path_client: ActionClient
     goal_active: bool = False
     goal_handle: ClientGoalHandle | None = None
     goal_generation: int = 0
@@ -76,6 +77,13 @@ class Coordinator(Node):
         self.declare_parameter('no_progress_timeout', 8.0)
         self.declare_parameter('progress_step', 0.1)
         self.declare_parameter('min_progress', 0.2)
+        # Where a learned allocator (#13) persists model/replay/meta. Defaults
+        # to $SLAM_RL_DATA_DIR so there is no hard-coded path; empty means the
+        # allocator decides. Harmless for allocators that ignore it.
+        self.declare_parameter('data_dir', os.environ.get('SLAM_RL_DATA_DIR', ''))
+        # Cost caching horizon: a cached Nav2 plan length older than this (s) is
+        # recomputed. One decision_period-ish is plenty since the map changes.
+        self.declare_parameter('cost_cache_ttl', 5.0)
 
         self._allocator_name: str = self.get_parameter('allocator').value
         self._coverage_threshold: float = self.get_parameter('coverage_threshold').value
@@ -85,12 +93,23 @@ class Coordinator(Node):
         self._no_progress_timeout: float = self.get_parameter('no_progress_timeout').value
         self._progress_step: float = self.get_parameter('progress_step').value
         self._min_progress: float = self.get_parameter('min_progress').value
+        self._data_dir: str = self.get_parameter('data_dir').value
+        self._cost_cache_ttl: float = self.get_parameter('cost_cache_ttl').value
 
-        self._allocator = make_allocator(self._allocator_name)
+        allocator_kwargs = {}
+        if self._data_dir:
+            allocator_kwargs['data_dir'] = self._data_dir
+        self._allocator = make_allocator(self._allocator_name, **allocator_kwargs)
         self.get_logger().info(f"[coord] allocator = '{self._allocator_name}'")
 
         self._coverage_done = False
         self._latest_map: OccupancyGrid | None = None
+        # Nav2 path-length cache keyed by (ns, rounded start, rounded goal) ->
+        # (path_len | None, stamp). Fed by async compute_path_to_pose results;
+        # the synchronous cost_fn reads it and misses trigger a background
+        # request so the value is ready on a later decision cycle.
+        self._cost_cache: dict[tuple, tuple[float | None, float]] = {}
+        self._cost_pending: set[tuple] = set()
 
         self._tf_buffer = Buffer()
         self._tf_listener = TransformListener(self._tf_buffer, self)
@@ -102,6 +121,9 @@ class Coordinator(Node):
                 ns=ns,
                 base_frame=frame(ns, 'base_link'),
                 nav_client=ActionClient(self, NavigateToPose, topic(ns, 'navigate_to_pose')),
+                path_client=ActionClient(
+                    self, ComputePathToPose, topic(ns, 'compute_path_to_pose')
+                ),
             )
 
         expected = load_expected_cells()
@@ -171,7 +193,13 @@ class Coordinator(Node):
             if pos is None:
                 continue
             positions[ns] = pos
-            states.append(RobotState(name=ns, x=pos[0], y=pos[1], busy=io.goal_active))
+            states.append(RobotState(
+                name=ns,
+                x=pos[0],
+                y=pos[1],
+                busy=io.goal_active,
+                current_goal=io.current_goal,
+            ))
 
         if not states:
             self.get_logger().warning(
@@ -179,8 +207,14 @@ class Coordinator(Node):
             )
             return
 
+        self._expire_cost_cache()
+        context = AllocationContext(
+            merged_map=self._latest_map,
+            robots=states,
+            cost_fn=self._make_cost_fn(positions),
+        )
         try:
-            goals = self._allocator.allocate(self._latest_map, states)
+            goals = self._allocator.allocate(context)
         except Exception as e:  # noqa: BLE001 - never let an allocator crash the node
             self.get_logger().error(f'[coord] allocator raised: {e}')
             return
@@ -193,6 +227,108 @@ class Coordinator(Node):
                 # Allocator chose to re-task a busy robot: cancel first.
                 self._cancel_goal(io, reason='re-tasked by allocator')
             self._dispatch(io, goal, positions.get(ns))
+
+    # ------------------------------------------------------------------
+    # Nav2 path-cost callback (compute_path_to_pose), cached per decision cycle
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _cost_key(ns: str, sx: float, sy: float, gx: float, gy: float) -> tuple:
+        """Cache key: namespace + start/goal rounded to the map resolution (5 cm)."""
+        return (ns, round(sx, 2), round(sy, 2), round(gx, 2), round(gy, 2))
+
+    def _make_cost_fn(self, positions: dict[str, tuple[float, float]]):
+        """Return a per-cycle Nav2 path-cost callback for this set of poses.
+
+        The allocator interface is synchronous and ROS-free, but
+        ``compute_path_to_pose`` is an async action. We bridge the two with a
+        cache: the callback returns a cached plan length if present, otherwise
+        ``None`` (so the allocator falls back to Euclidean distance this cycle)
+        and fires a background request whose result lands in the cache for a
+        later cycle. ``ns`` identifies which robot's planner to query; the
+        callback resolves the start from that robot's current pose, so the
+        allocator only passes the robot name and goal.
+        """
+
+        def cost_fn(ns: str, gx: float, gy: float) -> float | None:
+            start = positions.get(ns)
+            if start is None:
+                return None
+            key = self._cost_key(ns, start[0], start[1], gx, gy)
+            cached = self._cost_cache.get(key)
+            if cached is not None:
+                return cached[0]
+            self._request_path_cost(ns, start, (gx, gy), key)
+            return None
+
+        return cost_fn
+
+    def _expire_cost_cache(self) -> None:
+        now = self.get_clock().now().nanoseconds * 1e-9
+        stale = [k for k, (_, ts) in self._cost_cache.items() if now - ts > self._cost_cache_ttl]
+        for k in stale:
+            del self._cost_cache[k]
+
+    def _request_path_cost(
+        self, ns: str, start: tuple[float, float], goal: tuple[float, float], key: tuple,
+    ) -> None:
+        if key in self._cost_pending:
+            return
+        io = self._robots.get(ns)
+        if io is None or not io.path_client.server_is_ready():
+            return
+        req = ComputePathToPose.Goal()
+        req.use_start = True
+        req.start = self._pose_stamped(start[0], start[1])
+        req.goal = self._pose_stamped(goal[0], goal[1])
+        self._cost_pending.add(key)
+        future = io.path_client.send_goal_async(req)
+        future.add_done_callback(lambda f, k=key: self._on_path_goal_response(f, k))
+
+    def _on_path_goal_response(self, future: Future, key: tuple) -> None:
+        try:
+            handle: ClientGoalHandle = future.result()
+        except Exception:  # noqa: BLE001
+            self._cost_pending.discard(key)
+            return
+        if not handle.accepted:
+            self._cost_pending.discard(key)
+            return
+        handle.get_result_async().add_done_callback(
+            lambda f, k=key: self._on_path_result(f, k)
+        )
+
+    def _on_path_result(self, future: Future, key: tuple) -> None:
+        self._cost_pending.discard(key)
+        now = self.get_clock().now().nanoseconds * 1e-9
+        try:
+            path = future.result().result.path
+        except Exception:  # noqa: BLE001
+            self._cost_cache[key] = (None, now)
+            return
+        self._cost_cache[key] = (self._path_length(path), now)
+
+    @staticmethod
+    def _path_length(path) -> float | None:
+        poses = getattr(path, 'poses', [])
+        if len(poses) < 2:
+            return 0.0 if poses else None
+        total = 0.0
+        for a, b in zip(poses[:-1], poses[1:]):
+            total += math.hypot(
+                b.pose.position.x - a.pose.position.x,
+                b.pose.position.y - a.pose.position.y,
+            )
+        return total
+
+    def _pose_stamped(self, x: float, y: float) -> PoseStamped:
+        pose = PoseStamped()
+        pose.header.frame_id = self._map_frame
+        pose.header.stamp = self.get_clock().now().to_msg()
+        pose.pose.position.x = x
+        pose.pose.position.y = y
+        pose.pose.orientation.w = 1.0
+        return pose
 
     # ------------------------------------------------------------------
     # Nav2 dispatch + result handling
@@ -218,17 +354,7 @@ class Coordinator(Node):
         generation = io.goal_generation
 
         msg = NavigateToPose.Goal()
-        pose = PoseStamped()
-        pose.header.frame_id = self._map_frame
-        pose.header.stamp = self.get_clock().now().to_msg()
-        pose.pose.position.x = goal.x
-        pose.pose.position.y = goal.y
-        q = tf_transformations.quaternion_from_euler(0, 0, 0.0)
-        pose.pose.orientation.x = q[0]
-        pose.pose.orientation.y = q[1]
-        pose.pose.orientation.z = q[2]
-        pose.pose.orientation.w = q[3]
-        msg.pose = pose
+        msg.pose = self._pose_stamped(goal.x, goal.y)
 
         dist_str = (
             f'{math.hypot(goal.x - robot_pos[0], goal.y - robot_pos[1]):.2f}m'

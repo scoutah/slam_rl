@@ -10,9 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from nav_msgs.msg import OccupancyGrid
-
-from tb3_slam.allocator import candidates_for_robot, Goal, RobotState
+from tb3_slam.allocator import AllocationContext, Goal
 
 
 @dataclass
@@ -31,18 +29,14 @@ class NearestFrontierAllocator:
     #: does not thrash a moving robot every cycle.
     retask_busy: bool = False
 
-    def allocate(
-        self,
-        merged_map: OccupancyGrid,
-        robots: list[RobotState],
-    ) -> dict[str, Goal | None]:
+    def allocate(self, context: AllocationContext) -> dict[str, Goal | None]:
         """Assign each idle robot the nearest reachable frontier centroid."""
         goals: dict[str, Goal | None] = {}
-        for robot in robots:
+        for robot in context.robots:
             if robot.busy and not self.retask_busy:
                 goals[robot.name] = None
                 continue
-            candidates = candidates_for_robot(merged_map, robot)
+            candidates = context.candidates_for(robot)
             if not candidates:
                 goals[robot.name] = None
                 continue

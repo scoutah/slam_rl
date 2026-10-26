@@ -8,6 +8,8 @@ Classical (#12) and RL (#13) allocators register here as they are added.
 """
 from __future__ import annotations
 
+import inspect
+
 from tb3_slam.allocator import Allocator
 from tb3_slam.nearest_frontier_allocator import NearestFrontierAllocator
 
@@ -31,12 +33,37 @@ ALLOCATORS: dict[str, type] = {
 def make_allocator(name: str, **kwargs) -> Allocator:
     """Instantiate a registered allocator by name.
 
-    Raises ``ValueError`` for an unknown name so a bad launch argument fails
-    loudly rather than silently falling back.
+    Extra keyword arguments (e.g. ``data_dir`` for the RL allocator) are passed
+    through, but only those the chosen class actually accepts: the coordinator
+    can offer a superset of config for every method and each allocator picks up
+    only what it declares, so the stub does not break when the RL allocator's
+    options are supplied. Raises ``ValueError`` for an unknown name so a bad
+    launch argument fails loudly rather than silently falling back.
     """
     try:
         cls = ALLOCATORS[name]
     except KeyError:
         known = ', '.join(sorted(ALLOCATORS))
         raise ValueError(f'unknown allocator {name!r}; known: {known}') from None
-    return cls(**kwargs)
+    accepted = _accepted_kwargs(cls, kwargs)
+    return cls(**accepted)
+
+
+def _accepted_kwargs(cls: type, kwargs: dict) -> dict:
+    """Filter ``kwargs`` to the parameters ``cls.__init__`` actually accepts.
+
+    If the constructor declares ``**kwargs`` it takes everything; otherwise only
+    the named parameters are kept.
+    """
+    try:
+        sig = inspect.signature(cls)
+    except (TypeError, ValueError):
+        return kwargs
+    params = sig.parameters.values()
+    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params):
+        return kwargs
+    allowed = {
+        p.name for p in params
+        if p.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+    }
+    return {k: v for k, v in kwargs.items() if k in allowed}

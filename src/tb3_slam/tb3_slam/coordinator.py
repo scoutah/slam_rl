@@ -41,6 +41,7 @@ from tb3_slam.coverage_monitor import (
     load_expected_cells,
 )
 from tb3_slam.multi_robot import frame, MERGED_MAP_FRAME, ROBOT_NAMESPACES, topic
+from tb3_slam.path_cost import cost_key, path_length
 from tf2_ros import Buffer, TransformListener
 
 
@@ -235,7 +236,7 @@ class Coordinator(Node):
     @staticmethod
     def _cost_key(ns: str, sx: float, sy: float, gx: float, gy: float) -> tuple:
         """Cache key: namespace + start/goal rounded to the map resolution (5 cm)."""
-        return (ns, round(sx, 2), round(sy, 2), round(gx, 2), round(gy, 2))
+        return cost_key(ns, sx, sy, gx, gy)
 
     def _make_cost_fn(self, positions: dict[str, tuple[float, float]]):
         """Return a per-cycle Nav2 path-cost callback for this set of poses.
@@ -310,16 +311,7 @@ class Coordinator(Node):
 
     @staticmethod
     def _path_length(path) -> float | None:
-        poses = getattr(path, 'poses', [])
-        if len(poses) < 2:
-            return 0.0 if poses else None
-        total = 0.0
-        for a, b in zip(poses[:-1], poses[1:]):
-            total += math.hypot(
-                b.pose.position.x - a.pose.position.x,
-                b.pose.position.y - a.pose.position.y,
-            )
-        return total
+        return path_length(path)
 
     def _pose_stamped(self, x: float, y: float) -> PoseStamped:
         pose = PoseStamped()

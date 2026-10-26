@@ -13,12 +13,9 @@ have stable semantics regardless of frontier ordering.
 The replay buffer and model are persisted to disk so training
 accumulates across episodes launched by training_runner.py.
 """
-import collections
 import math
-import os
 from pathlib import Path
 import pickle
-import random
 import time
 
 from action_msgs.msg import GoalStatus
@@ -46,6 +43,23 @@ from tf2_ros import Buffer, TransformListener
 import tf_transformations
 from visualization_msgs.msg import MarkerArray
 
+from .rl_core import (
+    BATCH_SIZE,
+    compute_reward,
+    decay_epsilon,
+    EPSILON_START,
+    GAMMA,
+    LR,
+    make_features,
+    make_q_network,
+    MIN_REPLAY_SIZE,
+    ReplayBuffer,
+    resolve_persist_dir,
+    select_action,
+    TARGET_UPDATE_INTERVAL,
+    Transition,
+)
+
 try:
     import torch
     import torch.nn as nn
@@ -56,55 +70,7 @@ except ImportError as exc:
         '    pip install torch'
     ) from exc
 
-# ─────────────────────────────────────────────
-# Hyper-parameters
-# ─────────────────────────────────────────────
-FEATURE_DIM = 3             # [group_size_norm, path_length, coverage]
-
-REPLAY_CAPACITY = 50_000
-BATCH_SIZE = 64
-GAMMA = 0.99
-LR = 1e-3
-
-EPSILON_START = 1.0
-EPSILON_END = 0.05
-EPSILON_DECAY = 0.98
-
-TARGET_UPDATE_INTERVAL = 50
-MIN_REPLAY_SIZE = 50
-
-
-def _resolve_persist_dir() -> Path:
-    """Locate the directory for the persisted model / replay buffer.
-
-    Resolution order (first match wins):
-
-    1. ``SLAM_RL_DATA_DIR`` environment variable (explicit override, used by
-       containerised / cloud runs where the workspace path is not known).
-    2. ``<workspace>/rl_data`` where the workspace root is derived from
-       ``COLCON_PREFIX_PATH`` (``<workspace>/install``) – the same convention
-       the launch file uses to locate the project-local ``.venv``. This keeps
-       ``rl_data`` next to the ``results/`` and ``worlds/`` dirs that
-       ``training_runner.py`` writes.
-    3. ``./rl_data`` relative to the current working directory as a last
-       resort, so the node never falls back to an absolute path baked into
-       the source.
-    """
-    env_dir = os.environ.get('SLAM_RL_DATA_DIR')
-    if env_dir:
-        return Path(env_dir).expanduser()
-
-    prefix_path = os.environ.get('COLCON_PREFIX_PATH', '')
-    if prefix_path:
-        # COLCON_PREFIX_PATH may list several prefixes; the first is this ws.
-        first_prefix = prefix_path.split(os.pathsep)[0]
-        ws_root = Path(first_prefix).parent
-        return ws_root / 'rl_data'
-
-    return Path.cwd() / 'rl_data'
-
-
-PERSIST_DIR = _resolve_persist_dir()
+PERSIST_DIR = resolve_persist_dir()
 MODEL_PATH = PERSIST_DIR / 'model.pt'
 REPLAY_PATH = PERSIST_DIR / 'replay.pkl'
 META_PATH = PERSIST_DIR / 'meta.pkl'
@@ -112,72 +78,6 @@ META_PATH = PERSIST_DIR / 'meta.pkl'
 RANKING_TIMEOUT_S = 8.0
 GOAL_TIMEOUT_S = 45.0
 IDLE_SPIN_S = 15.0          # spin in place after this many seconds idle
-
-
-# ─────────────────────────────────────────────
-# Pointwise Q-Network
-# ─────────────────────────────────────────────
-
-class QNetwork(nn.Module):
-    """Map per-frontier features to a scalar Q-value."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(FEATURE_DIM, 64),
-            nn.ReLU(),
-            nn.Linear(64, 32),
-            nn.ReLU(),
-            nn.Linear(32, 1),
-        )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Return Q-values. x: (batch, features) -> (batch, 1)."""
-        return self.net(x)
-
-
-# ─────────────────────────────────────────────
-# Replay buffer
-# ─────────────────────────────────────────────
-
-Transition = collections.namedtuple(
-    'Transition',
-    ['state', 'action_features', 'reward', 'next_candidates', 'done'],
-)
-
-
-class ReplayBuffer:
-    """Fixed-capacity replay buffer with disk persistence."""
-
-    def __init__(self, capacity: int = REPLAY_CAPACITY) -> None:
-        self._buf: collections.deque[Transition] = (
-            collections.deque(maxlen=capacity)
-        )
-
-    def push(self, t: Transition) -> None:
-        """Add a transition."""
-        self._buf.append(t)
-
-    def sample(self, batch_size: int) -> list[Transition]:
-        """Sample a random mini-batch."""
-        return random.sample(self._buf, batch_size)
-
-    def __len__(self) -> int:
-        return len(self._buf)
-
-    def save(self, path: Path) -> None:
-        """Persist buffer to disk."""
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, 'wb') as f:
-            pickle.dump(list(self._buf), f)
-
-    def load(self, path: Path) -> None:
-        """Load buffer from disk."""
-        if not path.exists():
-            return
-        with open(path, 'rb') as f:
-            data = pickle.load(f)
-        self._buf = collections.deque(data, maxlen=self._buf.maxlen)
 
 
 # ─────────────────────────────────────────────
@@ -248,8 +148,8 @@ class RLExplorer(Node):
         self._device = torch.device(
             'cuda' if torch.cuda.is_available() else 'cpu'
         )
-        self._q_net = QNetwork().to(self._device)
-        self._target_net = QNetwork().to(self._device)
+        self._q_net = make_q_network().to(self._device)
+        self._target_net = make_q_network().to(self._device)
         self._target_net.load_state_dict(self._q_net.state_dict())
         self._target_net.eval()
         self._optimizer = optim.Adam(
@@ -494,7 +394,9 @@ class RLExplorer(Node):
             delta_cov = (
                 self._ranking_coverage - self._last_coverage
             )
-            reward = delta_cov / dt * 100.0
+            reward = compute_reward(
+                self._last_coverage, self._ranking_coverage, dt,
+            )
             done = (
                 self._ranking_coverage
                 >= self._coverage_threshold
@@ -569,11 +471,7 @@ class RLExplorer(Node):
         coverage: float,
     ) -> np.ndarray:
         """Build normalised feature vector for one frontier."""
-        return np.array([
-            group_size / 100.0,
-            path_length / 10.0,
-            coverage,
-        ], dtype=np.float32)
+        return make_features(group_size, path_length, coverage)
 
     # ------------------------------------------------------------------
     # RL core
@@ -581,12 +479,9 @@ class RLExplorer(Node):
 
     def _select_action(self, candidates: np.ndarray) -> int:
         """Epsilon-greedy over pointwise Q-values."""
-        if random.random() < self._epsilon:
-            return random.randrange(len(candidates))
-        with torch.no_grad():
-            t = torch.FloatTensor(candidates).to(self._device)
-            q_vals = self._q_net(t).squeeze(-1)
-            return int(q_vals.argmax().item())
+        return select_action(
+            candidates, self._epsilon, self._q_net, self._device,
+        )
 
     def _update_network(self) -> None:
         """One gradient step on a mini-batch."""
@@ -630,9 +525,7 @@ class RLExplorer(Node):
         self._optimizer.step()
 
         self._step_count += 1
-        self._epsilon = max(
-            EPSILON_END, self._epsilon * EPSILON_DECAY,
-        )
+        self._epsilon = decay_epsilon(self._epsilon)
 
         if self._step_count % TARGET_UPDATE_INTERVAL == 0:
             self._target_net.load_state_dict(

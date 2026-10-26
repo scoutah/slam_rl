@@ -149,4 +149,3 @@ def namespace_nav2_params(params: dict, ns: str) -> dict:
     rewritten = copy.deepcopy(params)
     _namespace_nav2_node(rewritten, ns)
     return rewritten
-

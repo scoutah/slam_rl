@@ -8,8 +8,8 @@ WORLD_META_FILE so nodes can read it regardless of how they are launched.
 """
 import json
 
-import numpy as np
 from nav_msgs.msg import OccupancyGrid
+import numpy as np
 
 from tb3_slam.utils import load_world_size, WORLD_META_FILE
 
@@ -39,12 +39,11 @@ def load_episode_timeout() -> float:
 
 
 def load_expected_cells() -> int | None:
-    """
-    Read the expected number of traversable cells from the world metadata file
-    written by generate_random_world().
+    """Read the expected number of traversable cells from the world metadata.
 
-    Returns None if the file does not exist or cannot be parsed – callers should
-    fall back to a sensible default (e.g. total map size) and log a warning.
+    The count is written by generate_random_world(). Returns None if the file
+    does not exist or cannot be parsed – callers should fall back to a sensible
+    default (e.g. total map size) and log a warning.
     """
     if not WORLD_META_FILE.exists():
         return None
@@ -55,8 +54,7 @@ def load_expected_cells() -> int | None:
 
 
 def check_coverage(msg: OccupancyGrid, expected_cells: int) -> tuple[float, int]:
-    """
-    Compute exploration coverage against the pre-calculated traversable cell count.
+    """Compute exploration coverage against the pre-calculated cell count.
 
     A cell counts as "discovered" when its occupancy value is >= 0 (i.e. not unknown).
     The ratio is capped at 1.0 because SLAM may classify slightly more cells as known
@@ -66,8 +64,10 @@ def check_coverage(msg: OccupancyGrid, expected_cells: int) -> tuple[float, int]
         msg:            Latest OccupancyGrid message from /map.
         expected_cells: Pre-calculated traversable cell count (from load_expected_cells).
 
-    Returns:
+    Returns
+    -------
         (coverage_ratio, known_cell_count)
+
     """
     if expected_cells <= 0:
         return 0.0, 0

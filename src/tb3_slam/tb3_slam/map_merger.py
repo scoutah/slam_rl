@@ -1,5 +1,5 @@
-import numpy as np
 from nav_msgs.msg import OccupancyGrid
+import numpy as np
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
@@ -9,10 +9,9 @@ from tb3_slam.multi_robot import MERGED_MAP_FRAME, ROBOT_NAMESPACES, topic
 
 
 class MapMerger(Node):
-    """
-    Merge every robot's Cartographer map into one global ``/map``.
+    """Merge every robot's Cartographer map into one global ``/map``.
 
-    Parameters:
+    Parameters (ROS):
       spawns      flat [x1, y1, x2, y2, ...] spawn poses (metres, ``map`` frame),
                   one per robot in ROBOT_NAMESPACES order; ``<ns>/map`` starts there.
       world_size  edge length of the square world (m); fixes the merged extent.

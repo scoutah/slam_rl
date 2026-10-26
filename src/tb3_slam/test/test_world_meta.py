@@ -1,9 +1,9 @@
 """Tests for per-world metadata sidecars (coverage denominator reuse)."""
 import json
 import math
+from pathlib import Path
 import random
 import re
-from pathlib import Path
 
 import pytest
 

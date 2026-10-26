@@ -1,8 +1,8 @@
-import time
 from pathlib import Path
+import time
 
-import rclpy
 from nav_msgs.msg import OccupancyGrid
+import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Float32
 

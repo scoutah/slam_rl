@@ -1,9 +1,8 @@
 """Tests for build_frontier_markers."""
-import numpy as np
 from nav_msgs.msg import OccupancyGrid
-from visualization_msgs.msg import Marker
-
+import numpy as np
 from tb3_slam.frontier_viz import build_frontier_markers
+from visualization_msgs.msg import Marker
 
 
 def _make_map(resolution: float = 0.05, origin=(0.0, 0.0), size=(4, 4)) -> OccupancyGrid:

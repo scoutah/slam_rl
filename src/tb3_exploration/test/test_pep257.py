@@ -20,5 +20,8 @@ import pytest
 @pytest.mark.linter
 @pytest.mark.pep257
 def test_pep257():
-    rc = main(argv=['.', 'test'])
+    # D213 (summary on 2nd line) conflicts with the ament convention's D212
+    # ignore; pydocstyle 6 leaks it through despite the first-line-summary
+    # style used throughout this project, so suppress it explicitly.
+    rc = main(argv=['--add-ignore', 'D213', '.', 'test'])
     assert rc == 0, 'Found code style errors / warnings'

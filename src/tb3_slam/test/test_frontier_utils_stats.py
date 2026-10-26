@@ -1,6 +1,6 @@
 """Tests for centroids_from_map_debug stats dict."""
-import numpy as np
 from nav_msgs.msg import OccupancyGrid
+import numpy as np
 
 from tb3_slam.frontier_utils import centroids_from_map_debug
 
@@ -99,4 +99,3 @@ def test_phantom_unknown_beyond_wall_is_not_a_frontier():
     # No FREE cell on the left touches UNCERTAIN (50 is only next to the
     # wall, not to any FREE cell in col 1), so no frontiers expected.
     assert stats['frontiers'] == []
-

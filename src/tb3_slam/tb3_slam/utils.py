@@ -1,7 +1,7 @@
 import json
-import random
 import os
 from pathlib import Path
+import random
 from typing import List, Tuple
 
 WORLD_META_FILE = Path('/tmp/slam_world_meta.json')
@@ -117,6 +117,14 @@ def load_spawns(meta_path: Path) -> List[Tuple[float, float]]:
         return spawn_poses(DEFAULT_WORLD_SIZE)
 
 
+def load_world_size(meta_path: Path) -> float:
+    """Edge length of the world from a world metadata file (default if unknown)."""
+    try:
+        return float(json.loads(Path(meta_path).read_text())['world_size'])
+    except (OSError, KeyError, TypeError, ValueError):
+        return DEFAULT_WORLD_SIZE
+
+
 def check_world_size(world_size: float) -> float:
     """Return world_size if it is one of WORLD_SIZES, else raise ValueError."""
     if world_size not in WORLD_SIZES:
@@ -128,20 +136,22 @@ def check_world_size(world_size: float) -> float:
 def generate_random_world(
     file_path: str, world_size: float = DEFAULT_WORLD_SIZE,
 ) -> tuple[bool, int]:
-    """
-    Generates a closed square Gazebo SDF world (world_size x world_size m)
-    with house-like interior rooms; the number of rooms follows the area.
-    Writes the world to file_path and writes expected traversable cell count
-    (plus spawn poses) both to a sidecar next to the world (``<world>.meta.json``,
-    so a saved world can be reused via --world with the correct coverage
-    denominator) and to the shared WORLD_META_FILE that running nodes read.
+    """Generate a closed square Gazebo SDF world with house-like rooms.
 
-    Returns:
-        (success, expected_traversable_cells)
-        expected_traversable_cells is 0 on failure.
+    The world is ``world_size`` x ``world_size`` m; the number of rooms follows
+    the area. Writes the world to file_path and writes the expected traversable
+    cell count (plus spawn poses) both to a sidecar next to the world
+    (``<world>.meta.json``, so a saved world can be reused via --world with the
+    correct coverage denominator) and to the shared WORLD_META_FILE that running
+    nodes read.
 
-    Raises:
+    Returns ``(success, expected_traversable_cells)``;
+    ``expected_traversable_cells`` is 0 on failure.
+
+    Raises
+    ------
         ValueError: world_size is not one of WORLD_SIZES.
+
     """
     check_world_size(world_size)
 
@@ -217,7 +227,7 @@ def generate_random_world(
 
         def separates_spawns(room: Tuple[float, float, float, float],
                              vertical: bool, cut: float) -> bool:
-            """True if cutting room at cut would put the robots in different rooms.
+            """Report whether cutting room at cut splits the robots apart.
 
             Guarantees a shared start room by design. The keep-out box alone
             only does so incidentally: a door gap (MIN_PATH_WIDTH) could
@@ -232,10 +242,10 @@ def generate_random_world(
         # 1. Outer boundary (closed box room)
         # --------------------------------------------------
 
-        walls.append(create_wall("outer_north", 0,  half, world_size, wall_thickness))
-        walls.append(create_wall("outer_south", 0, -half, world_size, wall_thickness))
-        walls.append(create_wall("outer_east",  half, 0, wall_thickness, world_size))
-        walls.append(create_wall("outer_west", -half, 0, wall_thickness, world_size))
+        walls.append(create_wall('outer_north', 0,  half, world_size, wall_thickness))
+        walls.append(create_wall('outer_south', 0, -half, world_size, wall_thickness))
+        walls.append(create_wall('outer_east',  half, 0, wall_thickness, world_size))
+        walls.append(create_wall('outer_west', -half, 0, wall_thickness, world_size))
 
         # --------------------------------------------------
         # 2. Interior room-like structure (connected BSP split)
@@ -259,7 +269,7 @@ def generate_random_world(
         doors: List[Tuple[float, float, float, float]] = []
 
         def blocks_existing_door(segments) -> bool:
-            """True if any wall segment overlaps or crowds an existing door.
+            """Report whether any wall segment overlaps or crowds a door.
 
             segments are (center_x, center_y, size_x, size_y) boxes, doors the
             widened opening rectangles described above.
@@ -344,7 +354,7 @@ def generate_random_world(
 
                     axis = 'v' if vertical else 'h'
                     for seg_idx, (x, y, sx, sy) in enumerate(segments):
-                        name = f"split_{split_count}_{axis}_{seg_idx}"
+                        name = f'split_{split_count}_{axis}_{seg_idx}'
                         walls.append(create_wall(name, x, y, sx, sy))
 
                     m = MIN_DOOR_SIDE_WALL

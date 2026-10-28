@@ -13,7 +13,9 @@ setup(
         ('share/ament_index/resource_index/packages',
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
-        (os.path.join('share', package_name, 'launch'), glob(os.path.join('launch', '*launch.py')))
+        (os.path.join('share', package_name, 'launch'),
+            glob(os.path.join('launch', '*launch.py'))),
+        (os.path.join('share', package_name, 'rviz'), glob(os.path.join('rviz', '*.rviz'))),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -29,7 +31,10 @@ setup(
     entry_points={
         'console_scripts': [
             'cmd_vel_relay = tb3_slam.cmd_vel_relay:main',
+            'coordinator = tb3_slam.coordinator:main',
             'episode_manager = tb3_slam.episode_manager:main',
+            'map_merger = tb3_slam.map_merger:main',
+            'tf_relay = tb3_slam.tf_relay:main',
         ],
     },
 )

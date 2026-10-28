@@ -258,7 +258,7 @@ def centroids_from_map_debug(
     msg: OccupancyGrid,
     robot_grid_pos: tuple[int, int] | None = None,
 ) -> tuple[list[tuple[int, int]], dict]:
-    """Same as ``centroids_from_map`` but also returns diagnostic stats.
+    """Return ``centroids_from_map`` results together with diagnostic stats.
 
     Stats keys:
       - grid_shape, robot_grid_pos, robot_cell_value

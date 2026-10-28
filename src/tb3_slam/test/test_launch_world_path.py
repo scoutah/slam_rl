@@ -21,7 +21,12 @@ def test_gazebo_receives_world_path_as_one_literal_argument(monkeypatch, world_f
     spec = importlib.util.spec_from_file_location('sim_slam_launch_path_test', launch_path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    monkeypatch.setattr(module, 'prepare_world', lambda size: (world_file, 0.0, 0.0))
+    monkeypatch.setattr(module, 'prepare_world',
+                        lambda size: (world_file, [(0.0, 0.0), (1.0, 0.0)]))
+    monkeypatch.setattr(module, 'write_robot_configs', lambda ns, out_dir: {
+        'model': f'/tmp/{ns}/model.sdf', 'bridge': f'/tmp/{ns}/bridge.yaml',
+        'cartographer_dir': f'/tmp/{ns}', 'nav2': f'/tmp/{ns}/nav2_params.yaml',
+    })
     description = module.generate_launch_description()
     context = LaunchContext()
     world_action = next(action for action in description.entities

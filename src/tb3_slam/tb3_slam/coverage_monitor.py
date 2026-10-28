@@ -7,23 +7,43 @@ The expected cell count is pre-calculated by generate_random_world() and stored 
 WORLD_META_FILE so nodes can read it regardless of how they are launched.
 """
 import json
-from pathlib import Path
 
-import numpy as np
 from nav_msgs.msg import OccupancyGrid
+import numpy as np
 
-from tb3_slam.utils import WORLD_META_FILE
+from tb3_slam.utils import load_world_size, WORLD_META_FILE
 
 DEFAULT_COVERAGE_THRESHOLD: float = 0.99
 
+EPISODE_TIMEOUT_BY_WORLD_SIZE: dict[float, float] = {
+    8.0: 600.0,
+    12.0: 900.0,
+}
+_TIMEOUT_PER_AREA_S: float = EPISODE_TIMEOUT_BY_WORLD_SIZE[8.0] / (8.0 * 8.0)
+
+
+def timeout_for_world_size(world_size: float) -> float:
+    """Episode wall-clock timeout (seconds) appropriate for a square world.
+
+    Uses the tuned per-size budget for the study sizes (8, 12) and falls back to
+    an area-proportional estimate for any other size.
+    """
+    if world_size in EPISODE_TIMEOUT_BY_WORLD_SIZE:
+        return EPISODE_TIMEOUT_BY_WORLD_SIZE[world_size]
+    return _TIMEOUT_PER_AREA_S * float(world_size) * float(world_size)
+
+
+def load_episode_timeout() -> float:
+    """Episode timeout for the world described by the shared metadata file."""
+    return timeout_for_world_size(load_world_size(WORLD_META_FILE))
+
 
 def load_expected_cells() -> int | None:
-    """
-    Read the expected number of traversable cells from the world metadata file
-    written by generate_random_world().
+    """Read the expected number of traversable cells from the world metadata.
 
-    Returns None if the file does not exist or cannot be parsed – callers should
-    fall back to a sensible default (e.g. total map size) and log a warning.
+    The count is written by generate_random_world(). Returns None if the file
+    does not exist or cannot be parsed – callers should fall back to a sensible
+    default (e.g. total map size) and log a warning.
     """
     if not WORLD_META_FILE.exists():
         return None
@@ -34,8 +54,7 @@ def load_expected_cells() -> int | None:
 
 
 def check_coverage(msg: OccupancyGrid, expected_cells: int) -> tuple[float, int]:
-    """
-    Compute exploration coverage against the pre-calculated traversable cell count.
+    """Compute exploration coverage against the pre-calculated cell count.
 
     A cell counts as "discovered" when its occupancy value is >= 0 (i.e. not unknown).
     The ratio is capped at 1.0 because SLAM may classify slightly more cells as known
@@ -45,8 +64,10 @@ def check_coverage(msg: OccupancyGrid, expected_cells: int) -> tuple[float, int]
         msg:            Latest OccupancyGrid message from /map.
         expected_cells: Pre-calculated traversable cell count (from load_expected_cells).
 
-    Returns:
+    Returns
+    -------
         (coverage_ratio, known_cell_count)
+
     """
     if expected_cells <= 0:
         return 0.0, 0

@@ -6,9 +6,8 @@ pull in ``visualization_msgs``/``geometry_msgs``.
 from builtin_interfaces.msg import Time
 from geometry_msgs.msg import Point
 from nav_msgs.msg import OccupancyGrid
-from visualization_msgs.msg import Marker, MarkerArray
-
 from tb3_slam.frontier_utils import grid_to_world
+from visualization_msgs.msg import Marker, MarkerArray
 
 _NAMESPACE = 'frontier_viz'
 _FRONTIER_ID = 0

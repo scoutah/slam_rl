@@ -21,7 +21,7 @@ University project, inherited from a previous team; README is in German.
 
 ```bash
 colcon build && source install/setup.bash          # re-source after every build
-ros2 launch tb3_slam sim_slam.launch.py exploration_mode:=classic   # or :=rl, headless:=true, world_size:=12
+ros2 launch tb3_slam sim_slam.launch.py exploration_mode:=classic   # or :=rl, headless:=true, rviz:=false, world_size:=12
 python3 training_runner.py --mode classic --episodes 20 --headless --randomize-worlds --world-size 12
 python3 training_runner.py --world worlds/<id>.sdf --episodes 5     # reuse a saved world
 colcon test --packages-select tb3_slam && colcon test-result --verbose
@@ -29,11 +29,13 @@ pkill -9 -f gz                                        # when Gazebo survives Ctr
 python3 tools/check_world_connectivity.py           # offline generator check, both sizes (no ROS)
 ```
 
-`training_runner.py` options: `--mode classic|rl`, `--episodes`, `--timeout` (600 s),
-`--threshold` (0.99), `--headless`, `--world PATH`, `--world-size 8|12` (edge length of
+`training_runner.py` options: `--mode classic|rl`, `--episodes`,
+`--threshold` (0.99), `--headless`, `--no-rviz`, `--world PATH`, `--world-size 8|12` (edge length of
 generated worlds, default 8; not allowed with `--world` alone), `--randomize-worlds` (otherwise ONE world
 is reused for all episodes), `--save-worlds` (persist to `worlds/`). The results CSV has a
-`world_size` column (read from the world's metadata sidecar).
+`world_size` column (read from the world's metadata sidecar). The episode timeout is **not**
+configurable: it is derived from the world size (`coverage_monitor.timeout_for_world_size`,
+600 s for 8 × 8 m, 900 s for 12 × 12 m) so larger worlds get a larger budget (#10).
 
 ## Architecture
 
@@ -48,18 +50,59 @@ Three ament_python packages in `src/`:
 **Launch sequence** (`src/tb3_slam/launch/sim_slam.launch.py`, timer-based):
 world generated at launch time in an `OpaqueFunction` (so the `world_size` launch arg is
 resolved; skipped if env `SLAM_WORLD_FILE` is set) →
-gz server (+ GUI unless headless) → spawn robot near the south wall (edge entry,
-scales with world size; `spawns[0]` of the world metadata until #8 adds robot 2) → 2 s robot_state_publisher
-→ 5 s Cartographer (`turtlebot3_cartographer`) → 6 s startup spin (4 s of TwistStamped on
-`/cmd_vel`) → 10 s Nav2 (`nav2_bringup/navigation_launch.py`, default params) →
-20 s exploration node. `episode_manager` and `cmd_vel_relay` start immediately.
+gz server (+ GUI unless headless) + one global `/clock` bridge → **per robot `r1`, `r2`**
+(namespaces `ROBOT_NAMESPACES`, spawns from the world metadata, both stacks in parallel):
+spawn `burger_<ns>` + gz bridge + `cmd_vel_relay` → 2 s robot_state_publisher → 5 s
+Cartographer (`cartographer_node` + `cartographer_occupancy_grid_node`, launched directly, no
+RViz) → 6 s startup spin (12.5 s at 0.5 rad/s of TwistStamped on `/<ns>/cmd_vel`, ~1 turn) → 10 s Nav2
+(`nav2_bringup/navigation_launch.py` under `PushRosNamespace`, default params rewritten per
+robot) → 20 s exploration. `episode_manager` starts immediately. `map_merger` fuses
+`/r1/map` + `/r2/map` into the global `/map` (see *Map merging*).
+`exploration_mode:=classic` and `:=rl` are the two user-facing methods; **both** now run the
+single centralised coordinator node (issue #11) on the merged `/map`, and the mode only selects
+which allocator sits behind the shared interface (`classic` → cost-utility, `rl` → pointwise
+DQN). There is no public `coordinator`/`allocator` argument — the mapping is implicit so the old
+`--mode classic|rl` / `exploration_mode:=classic|rl` interface keeps working unchanged. `:=none`
+brings up the bare stack (goals from outside). The old per-robot `frontier_explorer` /
+`reinforced_exploration` nodes are no longer launched; the method difference lives entirely in
+the allocator.
 
-**Data flow**
-- `/map` (OccupancyGrid from Cartographer) → explorers + episode_manager.
+**Namespacing** (`tb3_slam/multi_robot.py`, pure Python, unit-tested): at launch the upstream
+burger `model.sdf`, bridge yaml, `turtlebot3_lds_2d.lua` and `nav2_params.yaml` are rewritten
+per robot into a `/tmp/slam_rl_robots_*/<ns>/` dir. Every robot has
+- its own topics `/<ns>/{scan,odom,imu,joint_states,cmd_vel,map,…}` and actions
+  `/<ns>/navigate_to_pose`, `/<ns>/compute_path_to_pose`;
+- its own TF tree on **`/<ns>/tf`, `/<ns>/tf_static`** (Nav2 multi-robot convention; every
+  robot node remaps `/tf` → `tf`), nothing on the global `/tf`;
+- prefixed frames `<ns>/map → <ns>/odom → <ns>/base_footprint → <ns>/base_link …` (gz
+  DiffDrive frame ids, RSP `frame_prefix`, Cartographer lua, Nav2 params), so the trees can be
+  joined later without collisions. `<ns>/map` starts at that robot's spawn pose.
+To inspect a tree: `ros2 run tf2_ros tf2_echo r1/map r1/base_link --ros-args -r /tf:=/r1/tf -r /tf_static:=/r1/tf_static`.
+
+**Map merging** (#9, `tb3_slam/map_merging.py` pure numpy + `map_merger.py` node, launched by
+`sim_slam.launch.py::map_merge_stack`): every `/<ns>/map` is placed by its grid origin plus
+the robot's spawn pose (`<ns>/map` starts at the spawn, yaw 0) onto one **fixed-extent** grid
+(world + 1 m margin, 0.05 m, frame `map`, origin never moves) and fused with a per-cell `max`
+(unknown −1 loses to anything, wall/uncertain beats free; 26–74 pass through), which keeps the
+cell semantics `frontier_utils` expects. Published at 2 Hz, TRANSIENT_LOCAL. Static
+`map → <ns>/map` transforms (spawn offset) are launched next to it. Limitations: offsets are
+fixed, so Cartographer drift/rotation between the robots is not corrected (fine for short
+8/12 m episodes; state it in the paper).
+*Why not `multirobot_map_merge` (m-explore-ros2)?* Tried first: it works in pixel space, treats
+the pose translation as cells and puts the merged origin at the grid centre, ignoring each
+map's own origin (which Cartographer moves as the map grows) – the result is not in the `map`
+frame and walls double.
+*Startup spin:* the old 1.5 rad/s spin (17° per 5 Hz scan) made Cartographer's map frame
+tilt ~10° against the world, which breaks the yaw-0 assumption and ruins the merge; no spin
+leaves the free cells "uncertain". 0.5 rad/s for 12.5 s keeps the maps axis-aligned.
+
+**Data flow** (per robot unless noted)
+- `/<ns>/map` (OccupancyGrid from Cartographer) → that robot's explorer and `map_merger`;
+  `/map` (merged, frame `map`) → `episode_manager` / coverage.
 - Nav2 actions used: `navigate_to_pose`, `compute_path_to_pose` (for ranking candidates).
-- `cmd_vel_relay`: Nav2 `/cmd_vel_smoothed` (Twist) → `/cmd_vel` (TwistStamped, Jazzy gz bridge).
-- `/frontiers_viz` (MarkerArray) for RViz; `/episode/coverage` (Float32).
-- All topics/frames are **global, single-robot** (`/map`, `/cmd_vel`, `map`→`base_link`).
+- `cmd_vel_relay`: Nav2 `/<ns>/cmd_vel_smoothed` (Twist) → `/<ns>/cmd_vel` (TwistStamped, Jazzy gz bridge).
+- `/<ns>/frontiers_viz` (MarkerArray) for RViz; `/episode/coverage` (Float32, global).
+- Explorers take `map_frame` / `base_frame` parameters (defaults `map` / `base_link`).
 
 **Inter-process files in `/tmp`**
 - `/tmp/slam_world_meta.json` – `expected_traversable_cells` (+ `spawns`, `world_size`), written by
@@ -73,8 +116,9 @@ scales with world size; `spawns[0]` of the world metadata until #8 adds robot 2)
 - Results: `results/<dd-mm-yyyy>-<mode>-<runid>.csv` (`;`-separated).
 
 **Episode end** (`episode_manager.py`): coverage ≥ threshold, or coverage gained
-< 0.5 % within 90 s (`stuck`), or 600 s wall clock. First 15 s of `/map` are ignored
-(stale TRANSIENT_LOCAL map from a previous Cartographer).
+< 0.5 % within 90 s (`stuck`), or a wall-clock timeout derived from the world size
+(600 s for 8 × 8 m, 900 s for 12 × 12 m; `coverage_monitor.timeout_for_world_size`, #10).
+First 15 s of `/map` are ignored (stale TRANSIENT_LOCAL map from a previous Cartographer).
 
 **Coverage** = known-free cells (value 0–25) / expected free cells from wall-area
 geometry, capped at 1.0.
@@ -118,6 +162,32 @@ replay buffer only when the episode succeeds (stuck/timeout episodes are discard
 Model/replay/meta persisted to **hard-coded** `~/projects/slam_rl/rl_data/`. No blacklist of
 failed goals; spins via `/cmd_vel` when idle 15 s.
 
+### Allocator interface + coordinator (`tb3_slam`, issue #11)
+
+The `coordinator` mode decouples goal *selection* from goal *dispatch* so the classical and RL
+methods differ **only** in the allocator behind one shared interface. Pure-Python, ROS-free,
+unit-tested pieces (`src/tb3_slam/test/test_allocator.py`):
+- `allocator.py` — the `Allocator` protocol `allocate(merged_map, [RobotState]) -> {ns: Goal|None}`,
+  the `RobotState`/`Goal`/`FrontierCandidate` dataclasses, and `candidates_for_robot()` (wraps
+  `frontier_utils.centroids_from_map_debug` seeded from each robot's cell on the **merged** map,
+  so every allocator sees identical candidates). A `Goal` of `None` means "leave this robot as is".
+- `nearest_frontier_allocator.py` — `NearestFrontierAllocator`, the dummy: each idle robot gets
+  its own Euclidean-nearest centroid (no deconfliction, no Nav2 cost). Validates the plumbing.
+- `allocator_registry.py` — `make_allocator(name)` maps the implicit mode name to a class
+  (`dummy`/`nearest` → the stub; `classic`/`rl` → the method behind `exploration_mode`). The
+  classical (#12) and RL (#13) allocators register under `classic`/`rl` here (both currently
+  fall back to the dummy until they land).
+
+`coordinator.py` is the single ROS node (un-namespaced, launched by `launch_explorers` for
+`exploration_mode:=classic`/`:=rl`). It owns all ROS I/O: subscribes to the merged `/map`
+(TRANSIENT_LOCAL), looks up each robot's pose via `/<ns>/tf` → `map`, calls the allocator every
+`decision_period` (2 s), and dispatches each goal to `/<ns>/navigate_to_pose`. Per-robot goal
+supervision mirrors the classic explorer (cancel after `goal_timeout` 45 s, or
+`no_progress_timeout` 8 s without `progress_step` 0.1 m; a "SUCCEEDED" that moved < `min_progress`
+0.2 m is logged as a non-move). Busy robots are left alone unless the allocator re-tasks them
+(then their current goal is cancelled first). Coverage/episode-end run off the merged `/map` as
+before. An allocator exception is caught and logged, never crashing the node.
+
 ## World generator (`tb3_slam/utils.py::generate_random_world`)
 
 Square box of edge length `world_size`, 0.15 m walls, house-like recursive BSP. Sizes are
@@ -147,7 +217,8 @@ Nothing in Cartographer (`turtlebot3_lds_2d.lua`, unbounded submaps) or Nav2 def
 
 **Study sizes (Studienbericht 2): 8 × 8 m (64 m²) and 12 × 12 m (144 m²).** Verified fully
 connected with `check_world_connectivity.py --world-size 8 12` (clearances 0.22–0.40 m).
-The episode timeout for these sizes is decided in #10 / #15 (600 s was tuned for 5 × 5 m).
+The episode timeout is derived from the world size (`coverage_monitor.timeout_for_world_size`,
+600 s for 8 × 8 m, 900 s for 12 × 12 m; #10).
 
 **Spawns (two robots, #6):** derived deterministically from `world_size` by `spawn_poses()`
 in utils.py – side by side at the same entry, `SPAWN_SEPARATION` (1.0 m) apart, mirrored
@@ -161,25 +232,37 @@ robots' clearance discs overlap.
 
 ## Known issues (state at start of WS 2026/27)
 
-1. **Single-robot everything** (no namespaces, one Cartographer, one Nav2, one `/map`).
+1. **Explorers still use per-robot maps**: the merged `/map` drives coverage and episode end
+   (#9/#10), but frontier detection and goal selection run per robot until the allocator
+   (#11) works on the merged map.
 
 ## Studienbericht 2 – multi-robot exploration
 
 ### Why
 
 On 5 × 5 m worlds with one robot, nearest-frontier is already near-optimal, so there is no
-room to tell whether RL beats a classical allocator. Larger, room-like worlds explored by
-two robots create coordination choices where a smarter allocator can matter. The graded
-deliverable is a paper of ~8000 words, so scope stays tight: anything that does not serve
-the research question is out of scope. The project is standalone – no single-robot baseline.
+room to tell whether RL helps. Larger, room-like worlds explored by two robots create
+coordination choices where a smarter allocator can matter. The interesting question is not
+just whether RL beats a classical allocator on the size it was trained on, but whether a
+*learned* allocator keeps that behaviour on a world geometry it never saw during training,
+whereas a classical allocator has no learned parameters and is generalisation-invariant by
+construction. The graded deliverable is a paper of ~8000 words, so scope stays tight:
+anything that does not serve the research question is out of scope. The project is
+standalone – no single-robot baseline.
 
 ### Research question
 
-> In two-robot exploration of large, room-like worlds, does an RL-based frontier allocator
-> outperform a good classical allocator?
+> How well does an RL-based multi-robot exploration strategy generalise to unknown
+> geometries compared to a classical exploration strategy?
 
-Two methods (classical vs RL), two robots, two map sizes – 8 × 8 m and 12 × 12 m (map size
-is the only independent variable besides method), one metric set.
+Two methods (classical vs RL), two robots, two map sizes. **The RL allocator is trained only
+on 8 × 8 m worlds**; both methods are then evaluated on **8 × 8 m (in-distribution, the
+training size)** and on **12 × 12 m (out-of-distribution, unseen geometry)**. World size is
+the only independent variable besides method; robot count stays constant at two. The
+classical allocator is the generalisation-invariant reference (no learned parameters,
+identical logic on both sizes). The quantity of interest is the **RL/classic ratio per world
+size and how it changes from 8 × 8 to 12 × 12**, not absolute completion times (which are not
+comparable across sizes).
 
 ### The system
 
@@ -189,9 +272,12 @@ are merged into one global map on which frontier detection, coverage and episode
 single allocator node sees the merged map and both robots' poses and assigns a frontier goal
 to each robot through a shared interface `(merged_map, poses) -> (goal_r1, goal_r2)`; the only
 difference between the two methods is the allocator behind that interface – a cost-utility
-classical allocator and a centralised pointwise-DQN allocator. Both methods run on identical
-worlds, frontier detection, Nav2 config, episode-end rules and metrics; evaluation compares
-time to coverage, stuck/timeout rate and distance travelled across many episodes.
+classical allocator and a centralised pointwise-DQN allocator. For the RL allocator to be
+transferable to the larger world at all, its per-frontier features must be **size-invariant**
+(relative/normalised, not absolute 8 × 8 coordinates). Both methods run on identical worlds,
+frontier detection, Nav2 config, episode-end rules and metrics; evaluation compares time to
+coverage, stuck/timeout rate, distance travelled and redundancy (doubly-covered area) across
+many episodes, reported in-distribution (8 × 8) vs out-of-distribution (12 × 12).
 
 ## Docker (headless)
 

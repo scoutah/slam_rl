@@ -7,8 +7,12 @@ Results are written to a per-run CSV file in results/.
 
 Usage:
     python3 training_runner.py [--mode classic|rl] [--episodes N]
-                               [--timeout SECONDS] [--threshold FLOAT]
-                               [--headless] [--world PATH] [--world-size METRES]
+                               [--threshold FLOAT]
+                               [--headless] [--no-rviz] [--world PATH]
+                               [--world-size METRES]
+
+The episode timeout is derived from the world size (issue #10) and is not
+configurable from the command line.
 
 Examples:
     python3 training_runner.py --mode classic --episodes 20
@@ -183,18 +187,21 @@ def build_launch_cmd(
     mode: str,
     episode_file: Path,
     threshold: float,
-    timeout: float,
     headless: bool,
+    rviz: bool = True,
 ) -> list[str]:
+    # The episode timeout is derived from the world size by episode_manager
+    # (issue #10) and is deliberately not configurable here.
     cmd = [
         'ros2', 'launch', 'tb3_slam', 'sim_slam.launch.py',
         f'exploration_mode:={mode}',
         f'episode_file:={episode_file}',
         f'coverage_threshold:={threshold}',
-        f'max_episode_duration:={timeout}',
     ]
     if headless:
         cmd.append('headless:=true')
+    elif not rviz:
+        cmd.append('rviz:=false')
     return cmd
 
 
@@ -256,6 +263,8 @@ _STALE_PATTERNS = [
     'reinforced_exploration',
     'episode_manager',
     'cmd_vel_relay',
+    'map_merger',
+    'static_transform_publisher',
     'robot_state_publisher',
 ]
 
@@ -277,7 +286,6 @@ def _kill_stale_ros_processes() -> None:
 def run(
     mode: str,
     n_episodes: int,
-    timeout: float,
     threshold: float,
     headless: bool,
     world_file: Path,
@@ -285,9 +293,11 @@ def run(
     randomize_worlds: bool = False,
     save_worlds: bool = False,
     world_size: float | None = None,
+    rviz: bool = True,
 ) -> None:
     print(f'[runner] Starting episodic training: mode={mode}, episodes={n_episodes}')
-    print(f'         threshold={threshold:.0%}, timeout={timeout:.0f}s, headless={headless}')
+    print(f'         threshold={threshold:.0%}, timeout=auto (world size), '
+          f'headless={headless}')
     print(f'         world    → {world_file}' + (' (new each episode)' if randomize_worlds else ''))
     print(f'         world size: {read_world_size(world_file) or "unknown"} m')
     print(f'         results  → {result_file}')
@@ -318,7 +328,7 @@ def run(
         env = os.environ.copy()
         env['SLAM_WORLD_FILE'] = str(world_file)
 
-        launch_cmd = build_launch_cmd(mode, EPISODE_FILE, threshold, timeout, headless)
+        launch_cmd = build_launch_cmd(mode, EPISODE_FILE, threshold, headless, rviz)
         print(f'[runner] Launching: {" ".join(launch_cmd)}')
 
         ep_start = time.time()
@@ -367,12 +377,12 @@ def main() -> None:
                         help='Exploration strategy (default: classic)')
     parser.add_argument('--episodes', type=int, default=10,
                         help='Number of episodes to run (default: 10)')
-    parser.add_argument('--timeout', type=float, default=600.0,
-                        help='Max episode duration in seconds (default: 600)')
     parser.add_argument('--threshold', type=float, default=0.99,
                         help='Coverage threshold to end episode (default: 0.99)')
     parser.add_argument('--headless', action='store_true',
                         help='Skip Gazebo GUI client')
+    parser.add_argument('--no-rviz', action='store_true',
+                        help='Do not open RViz with the Gazebo GUI (ignored with --headless)')
     parser.add_argument('--world', type=str, default=None,
                         help='Path to an existing .sdf world file (skip generation)')
     parser.add_argument('--world-size', type=float, default=None,
@@ -402,7 +412,6 @@ def main() -> None:
         run(
             mode=args.mode,
             n_episodes=args.episodes,
-            timeout=args.timeout,
             threshold=args.threshold,
             headless=args.headless,
             world_file=world_file,
@@ -410,6 +419,7 @@ def main() -> None:
             randomize_worlds=args.randomize_worlds,
             save_worlds=args.save_worlds,
             world_size=args.world_size,
+            rviz=not args.no_rviz,
         )
     except KeyboardInterrupt:
         print('\n[runner] Interrupted by user.')

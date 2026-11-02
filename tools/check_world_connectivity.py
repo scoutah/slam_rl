@@ -1,25 +1,10 @@
 #!/usr/bin/env python3
-"""
-Offline sanity check for the random world generator (no ROS required).
+"""Offline sanity check for the random world generator (no ROS, numpy only).
 
-Generates N worlds with tb3_slam.utils.generate_random_world (or loads the
-given .sdf files), rasterises the wall boxes, inflates them by a clearance
-radius and checks:
-
-  * connectivity – is all free space one connected region? More than one
-    region means some room is unreachable for a robot of that clearance.
-  * spawns        – for each robot: is its spawn point inside (inflated) wall
-                   (blocked), or outside the main free region (stranded)?
-                   Do the two robots' clearance discs overlap?
-
-Usage:
-    python3 tools/check_world_connectivity.py                 # 300 worlds
-    python3 tools/check_world_connectivity.py -n 1000 --seed 1
-    python3 tools/check_world_connectivity.py --clearance 0.22 0.3 0.4
-    python3 tools/check_world_connectivity.py --world-size 8 12
-    python3 tools/check_world_connectivity.py --world worlds/abc123.sdf
-
-Only needs numpy (e.g. `uv run --no-project --with numpy python ...`).
+Generates (or loads) worlds, rasterises and inflates the walls by a clearance
+radius, and reports whether all free space is one connected region and whether
+each robot's spawn is blocked/stranded or the two clearance discs overlap.
+Run with ``--help`` for options; e.g. ``uv run --no-project --with numpy python ...``.
 """
 import argparse
 import math

@@ -24,7 +24,8 @@ setup(
     },
     entry_points={
         'console_scripts': [
-            'reinforced_exploration = tb3_reinforced_exploration.rl_agent:main'
+            'reinforced_exploration = tb3_reinforced_exploration.rl_agent:main',
+            'rl_explorer = tb3_reinforced_exploration.multi_robot_explorer:main',
         ],
     },
 )

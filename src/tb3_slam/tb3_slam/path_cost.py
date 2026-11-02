@@ -1,6 +1,6 @@
-"""ROS-free helpers for the coordinator's Nav2 path-cost cache.
+"""ROS-free helpers for the explorer's Nav2 path-cost cache.
 
-Split out of coordinator.py (a rclpy node) so this pure logic is importable and
+Kept separate from the rclpy node so this pure logic is importable and
 unit-testable without ROS: the cache key and the polyline length of a plan.
 path_length duck-types a Nav2 Path (``path.poses[i].pose.position.{x,y}``).
 """

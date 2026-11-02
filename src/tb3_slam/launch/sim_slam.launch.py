@@ -292,23 +292,26 @@ def map_merge_stack(spawns: list[tuple[float, float]], world_size: float,
     return [*static_tfs, merge]
 
 
-def coordinator_node(allocator, use_sim_time, coverage_threshold, episode_file) -> Node:
-    """Centralised allocator-driven coordinator (issue #11).
+def explorer_node(mode, use_sim_time, coverage_threshold, episode_file) -> Node:
+    """Standalone explorer node for the selected method.
 
-    Runs un-namespaced: it reads the merged global ``/map`` and each robot's
-    pose, then dispatches goals to the per-robot ``/<ns>/navigate_to_pose``
-    actions. ``allocator`` is the strategy name behind the shared interface
-    (``classic`` or ``rl``) — the only thing that differs between the two
-    user-facing methods; everything else in the stack is identical.
+    ``classic`` runs the cost-utility explorer in ``tb3_exploration``; ``rl``
+    runs the learned explorer in ``tb3_reinforced_exploration``. Each is its own
+    node reading the merged global ``/map`` and dispatching goals to the
+    per-robot ``/<ns>/navigate_to_pose`` actions; the methods share only the
+    infrastructure in the base node, not a strategy.
     """
+    package, executable = {
+        'classic': ('tb3_exploration', 'classic_explorer'),
+        'rl': ('tb3_reinforced_exploration', 'rl_explorer'),
+    }[mode]
     return Node(
-        package='tb3_slam',
-        executable='coordinator',
-        name='coordinator',
+        package=package,
+        executable=executable,
+        name=f'{mode}_explorer',
         ros_arguments=['--log-level', 'info'],
         parameters=[{
             'use_sim_time': use_sim_time,
-            'allocator': allocator,
             'coverage_threshold': coverage_threshold,
             'episode_file': episode_file,
         }],
@@ -431,17 +434,14 @@ def generate_launch_description():
 
     def launch_explorers(context):
         mode = exploration_mode.perform(context)
-        # `classic` and `rl` are the user-facing methods. Both now run the
-        # single centralised coordinator (issue #11) on the merged map; the
-        # mode only selects which allocator sits behind the shared interface.
-        # The old per-robot explorers are gone — the method difference lives
-        # entirely in the allocator, so everything else is identical.
+        # `classic` and `rl` are the user-facing methods, each a standalone
+        # explorer node on the merged map; they share only the base node's
+        # infrastructure. `none` brings up the bare stack (goals from outside).
         if mode in ('classic', 'rl'):
-            return [coordinator_node(
+            return [explorer_node(
                 mode, use_sim_time, coverage_threshold, episode_file,
             )]
         if mode == 'none':
-            # Bare stack: goals come from outside (manual tests, allocator).
             return []
         raise ValueError(
             f"exploration_mode must be 'classic', 'rl' or 'none' (got {mode!r})"

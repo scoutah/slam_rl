@@ -1,11 +1,9 @@
-"""ROS-free core of the pointwise-DQN RL explorer.
+"""ROS-free learning core of the pointwise-DQN explorer.
 
-Holds the learning logic that does not depend on rclpy/tf2/Nav2/Gazebo:
-hyper-parameters, feature construction, the epsilon-greedy policy and its decay,
-the reward formula, the replay buffer with disk persistence, the Q-network and
-the persist-directory resolution. rl_agent.py imports everything from here, so
-the node behaves as before while this logic stays unit-testable without ROS
-(torch is imported lazily – only the network/policy need it).
+Features, epsilon-greedy policy + decay, reward, replay buffer with disk
+persistence, the Q-network and persist-dir resolution — everything that does not
+need rclpy/tf2/Nav2, so it stays unit-testable (torch is imported lazily).
+``rl_agent`` imports from here.
 """
 from __future__ import annotations
 

@@ -1,24 +1,4 @@
-"""Fuse the robots' occupancy grids into one global grid.
-
-Pure numpy (no ROS) so it can be unit tested. The merged grid has a fixed extent
-(the world plus a margin) in the shared ``map`` frame, so its origin never moves
-while the robots' own Cartographer grids grow. Each robot's grid is placed by its
-origin plus the robot's spawn pose (``<ns>/map`` starts at the spawn, yaw 0).
-
-Cells are fused by a fixed **priority**, not a raw min/max, and the merge is
-**stateful**: the result of the previous fusion is passed back in as ``base`` so a
-cell that was confirmed FREE once is not lost when Cartographer later reports it as
-UNKNOWN or UNCERTAIN again (which it does for cells at the edge of a scan as the
-robot turns/moves). Priority, highest first:
-
-* WALL (75-100)      – always wins (a real obstacle must still override free),
-* FREE (0-25)        – *sticky*: beats UNCERTAIN and UNKNOWN, only a WALL replaces it,
-* UNCERTAIN (26-74)  – beats only UNKNOWN,
-* UNKNOWN (-1)       – never overrides a known value.
-
-The 0-25 / 26-74 / 75-100 / -1 cell classes that ``frontier_utils`` relies on
-therefore stay intact, and once-free cells stop flickering back to grey.
-"""
+"""Fuse the robots' occupancy grids into one fixed-extent global grid (pure numpy)."""
 import math
 from typing import Iterable, NamedTuple
 
@@ -35,7 +15,12 @@ UNCERTAIN_MAX: int = 74
 
 
 def _priority(values: np.ndarray) -> np.ndarray:
-    """Map cell values to a fusion priority (higher wins). See module docstring."""
+    """Map cell values to a fusion priority (higher wins).
+
+    WALL (75-100) = 3 always wins; FREE (0-25) = 2 is sticky (only a wall replaces
+    it, so once-free cells don't flicker back to grey); UNCERTAIN (26-74) = 1 beats
+    only UNKNOWN (-1) = 0. This preserves the cell classes frontier_utils relies on.
+    """
     prio = np.zeros_like(values, dtype=np.int8)
     prio[values == UNKNOWN] = 0            # unknown: lowest, never overrides
     known = values != UNKNOWN

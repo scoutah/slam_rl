@@ -1,3 +1,4 @@
+"""Generate random room-like worlds and read/write their metadata (pure Python)."""
 import json
 import os
 from pathlib import Path

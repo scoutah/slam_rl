@@ -1,24 +1,9 @@
 #!/usr/bin/env python3
-"""
-Episodic SLAM training runner.
+"""Episodic SLAM training runner.
 
-Generates ONE world per script invocation and reuses it for all episodes.
-Results are written to a per-run CSV file in results/.
-
-Usage:
-    python3 training_runner.py [--mode classic|rl] [--episodes N]
-                               [--threshold FLOAT]
-                               [--headless] [--no-rviz] [--world PATH]
-                               [--world-size METRES]
-
-The episode timeout is derived from the world size (issue #10) and is not
-configurable from the command line.
-
-Examples:
-    python3 training_runner.py --mode classic --episodes 20
-    python3 training_runner.py --mode rl --episodes 100 --headless
-    python3 training_runner.py --world-size 12 --randomize-worlds --episodes 20
-    python3 training_runner.py --world worlds/abc123.sdf --episodes 5
+Generates/reuses a world, launches the sim, waits for the episode-end signal and
+writes a per-run CSV in results/. Run ``python3 training_runner.py --help`` for the
+options; the episode timeout is derived from world size (#10), not a CLI flag.
 """
 
 import argparse

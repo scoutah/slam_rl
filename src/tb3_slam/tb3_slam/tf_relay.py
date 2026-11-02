@@ -1,12 +1,9 @@
-"""Relay per-robot TF topics onto the global /tf and /tf_static for RViz.
+"""Mirror per-robot ``/<ns>/tf`` onto the global ``/tf`` so RViz can display it.
 
-Every robot publishes its transforms on /<ns>/tf and /<ns>/tf_static only
-(Nav2 multi-robot convention), so the global /tf stays empty and RViz
-displays that can only subscribe to /tf (notably RobotModel) show nothing.
-
-Frames are prefixed (r1/..., r2/...), so merging the trees onto the global
-/tf is collision-free. This node is a visualisation aid: it is launched only
-together with RViz and does not feed back into any robot stack.
+Robots publish transforms only on ``/<ns>/tf`` (Nav2 multi-robot convention), so
+the global ``/tf`` stays empty and RViz displays that only subscribe to ``/tf``
+(e.g. RobotModel) show nothing. Frames are prefixed, so merging is collision-free.
+Visualisation aid only: launched with RViz, never fed back into a robot stack.
 """
 
 from __future__ import annotations

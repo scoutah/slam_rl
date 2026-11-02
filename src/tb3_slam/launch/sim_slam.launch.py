@@ -286,6 +286,9 @@ def map_merge_stack(spawns: list[tuple[float, float]], world_size: float,
                 '--child-frame-id', frame(ns, 'map'),
             ],
             parameters=[{'use_sim_time': use_sim_time}],
+            # Nav2 must transform global explorer goals into its local map.
+            # The always-on relay also makes this edge available globally.
+            remappings=[('/tf_static', topic(ns, 'tf_static'))],
             output='log',
         )
         for ns, (x, y) in zip(ROBOT_NAMESPACES, spawns)
@@ -389,10 +392,8 @@ def generate_launch_description():
         ])),
     )
 
-    # RViz displays like RobotModel can only subscribe to the global /tf, but
-    # every robot keeps its transforms on /<ns>/tf. This relay mirrors the
-    # (prefixed, collision-free) per-robot trees onto /tf for RViz only; it is
-    # gated on the same condition as RViz and never feeds a robot stack.
+    # Both central explorers need the prefixed robot trees on global /tf,
+    # including headless runs. Per-robot Nav2 still reads only its own TF topics.
     tf_relay_node = Node(
         package='tb3_slam',
         executable='tf_relay',
@@ -402,9 +403,6 @@ def generate_launch_description():
             'namespaces': list(ROBOT_NAMESPACES),
         }],
         output='log',
-        condition=IfCondition(PythonExpression([
-            "'", rviz, "'.lower() == 'true' and '", headless, "'.lower() != 'true'",
-        ])),
     )
 
     set_env_vars_resources = AppendEnvironmentVariable(

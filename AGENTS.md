@@ -59,7 +59,8 @@ headless) + global `/clock` bridge → **per robot `r1`, `r2`** in parallel: spa
 `turtlebot3_lds_2d.lua` and `nav2_params.yaml` are rewritten per robot into `/tmp/slam_rl_robots_*/<ns>/`.
 Each robot has its own `/<ns>/{scan,odom,map,cmd_vel,…}` topics and `navigate_to_pose` /
 `compute_path_to_pose` actions, its own TF tree on **`/<ns>/tf`,`/<ns>/tf_static`** (nothing on
-global `/tf`; every node remaps `/tf`→`tf`), and prefixed frames `<ns>/map → <ns>/odom →
+global `/tf` from the robot nodes; the relay mirrors their trees for central consumers;
+every robot node remaps `/tf`→`tf`), and prefixed frames `<ns>/map → <ns>/odom →
 <ns>/base_footprint → …`. `<ns>/map` starts at that robot's spawn pose.
 Inspect: `ros2 run tf2_ros tf2_echo r1/map r1/base_link --ros-args -r /tf:=/r1/tf -r /tf_static:=/r1/tf_static`.
 
@@ -69,6 +70,9 @@ origin never moves) and fused by per-cell priority. Static `map → <ns>/map` tr
 spawn offset. Offsets are fixed, so inter-robot Cartographer drift is not corrected (acceptable for
 short 8/12 m episodes — state it in the paper). The detailed rationale (why not `multirobot_map_merge`,
 why the gentle startup spin) lives in `map_merging.py` and `sim_slam.launch.py`.
+Known current robot footprints (0.22 m radius from TF) override fused occupancy to remove
+teammate laser returns that otherwise trap a robot's own frontier seed. This deliberately trusts
+localisation inside the footprint; outside it the wall-first fusion priority is unchanged.
 
 **Frontier pipeline** (`frontier_utils.py`, both explorers): cell classes `0–25` free / `26–74`
 uncertain / `75–100` wall / `-1` unknown. A **frontier = FREE cell with an UNCERTAIN cardinal
@@ -79,13 +83,17 @@ nearest footprint-safe, cardinal-connected FREE cell to the centroid, ≥ `MIN_G
 **0.4999** offset on purpose (Nav2 rounding) — don't "fix" to 0.5.
 
 **Explorer base + methods**: common ROS I/O lives in `tb3_slam/multi_robot_explorer.py::MultiRobotExplorerNode`;
-a method is a subclass overriding one method, `select_goals(merged_map, [RobotState]) -> {ns: Goal|None}`
+a method can override `select_goals(merged_map, [RobotState]) -> {ns: Goal|None}`
 (a `Goal` of `None` = leave the robot as is). The base subscribes to the merged `/map`, looks up each
 robot pose, calls `select_goals` every 2 s, dispatches to `/<ns>/navigate_to_pose`, and supervises
 goals (cancel after `goal_timeout` 45 s, or `no_progress_timeout` 8 s without `progress_step` 0.1 m).
-Helpers for subclasses: `candidates_for(robot)` and `path_cost(robot, x, y)`. Both subclasses
-(`ClassicExplorer`, `RLExplorer`) currently inherit the empty `select_goals` (baseline wiring);
-the strategies are layered on later.
+Helpers for subclasses: `candidates_for(robot)` and `path_cost(robot, x, y)`.
+`ClassicExplorer` owns its asynchronous decision rounds: serial confirmed Nav2 plans per robot,
+then greedy cost-utility assignment with marginal visible area, frontier-group reservations,
+latest-map reachability checks and failed-goal memory. It keeps valid active goals stable.
+See `tb3_exploration/cost_utility.py` for the formula and fixed, size-independent parameters.
+`RLExplorer` on main still has empty selection; its implementation is tracked in #13.
+The TF relay runs even without RViz so the central explorers can resolve both robot poses.
 
 **Coverage / episode end** (`episode_manager.py` on the merged `/map`): coverage = known-free cells
 (0–25) / expected free cells, capped at 1.0. Episode ends on coverage ≥ threshold, <0.5 % gained in

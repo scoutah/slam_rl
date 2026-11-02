@@ -1,12 +1,12 @@
-"""ROS node that fuses each robot's map into the global /map via map_merging."""
+"""Fuse robot maps into /map, removing teammate returns in known robot footprints."""
 from nav_msgs.msg import OccupancyGrid
 import numpy as np
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
-
-from tb3_slam.map_merging import fuse_grids, merged_grid_spec
-from tb3_slam.multi_robot import MERGED_MAP_FRAME, ROBOT_NAMESPACES, topic
+from tb3_slam.map_merging import clear_robot_footprints, fuse_grids, merged_grid_spec
+from tb3_slam.multi_robot import frame, MERGED_MAP_FRAME, ROBOT_NAMESPACES, topic
+from tf2_ros import Buffer, TransformListener
 
 
 class MapMerger(Node):
@@ -39,6 +39,8 @@ class MapMerger(Node):
         # Persistent merged state: the fusion is stateful so a cell confirmed FREE
         # once is not lost when Cartographer later reports it UNKNOWN/UNCERTAIN.
         self._merged: np.ndarray | None = None
+        self._tf_buffer = Buffer()
+        self._tf_listener = TransformListener(self._tf_buffer, self)
 
         # Cartographer's occupancy grid node latches its map (TRANSIENT_LOCAL).
         qos = QoSProfile(
@@ -82,6 +84,16 @@ class MapMerger(Node):
         except ValueError as exc:
             self.get_logger().error(str(exc), throttle_duration_sec=10.0)
             return
+        positions = []
+        for ns in ROBOT_NAMESPACES:
+            try:
+                transform = self._tf_buffer.lookup_transform(
+                    MERGED_MAP_FRAME, frame(ns, 'base_link'), rclpy.time.Time())
+                point = transform.transform.translation
+                positions.append((point.x, point.y))
+            except Exception:  # noqa: BLE001 - TF may not be ready at startup
+                continue
+        clear_robot_footprints(merged, self._spec, positions)
         self._merged = merged
 
         out = OccupancyGrid()

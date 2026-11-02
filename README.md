@@ -67,6 +67,16 @@ colcon test --packages-select tb3_slam && colcon test-result --verbose
 `colcon test` liefert Exit 0 auch bei Fehlern – immer `colcon test-result`
 lesen.
 
+## Klassische Exploration
+
+`classic_explorer` verteilt bestätigte Nav2-Pfade mit einer Greedy-Cost-Utility-
+Zuweisung. Der Nutzen schätzt die sichtbare unbekannte/unsichere Fläche innerhalb
+von 3,5 m; bekannte Wände verdecken dahinterliegende Zellen. Bereits vergebene
+Frontiers und überlappende Sichtbereiche werden bei weiteren Zuweisungen
+berücksichtigt. Laufende Fahrten bleiben stabil, freie Roboter erhalten neue Ziele.
+Die Methode verwendet auf 8×8 und 12×12 dieselben Parameter und lernt nichts.
+Formel und Greedy-Entscheidung sind in `tb3_exploration/cost_utility.py` dokumentiert.
+
 ## Code map
 
 Index mit einer Zeile pro Datei. **Vor jeder Code-Änderung lesen, nach jeder
@@ -80,23 +90,28 @@ betreffenden Stelle im Code, nicht hier und nicht in langen Datei-Headern.
 | `launch/sim_slam.launch.py` | Timergesteuerter Start des gesamten Stacks: Weltgen → gz → pro Roboter Spawn/Bridge/Relay/RSP/Cartographer/Start-Spin/Nav2 → Map-Merge → Explorer. `exploration_mode:=classic\|rl\|none`. |
 | `tb3_slam/utils.py` | `generate_random_world` (BSP-Haus, nur Studiengrößen 8/12), `spawn_poses`/`load_spawns`, Welt-Metadaten-I/O. |
 | `tb3_slam/multi_robot.py` | Pure-Python-Namespacing der Upstream-TurtleBot3-Configs (model.sdf / Bridge / Cartographer-lua / Nav2-Params). Unit-getestet, kein ROS. |
-| `tb3_slam/map_merging.py` | Pure-numpy-Fusion: feste Ausdehnung im `map`-Frame, zustandsbehaftete Zell-Priorität (WALL > sticky-FREE > UNCERTAIN > UNKNOWN). Erhält die `frontier_utils`-Zellklassen. |
-| `tb3_slam/map_merger.py` | ROS-Node um `map_merging`: abonniert `/<ns>/map`, publiziert `/map` mit 2 Hz TRANSIENT_LOCAL. |
-| `tb3_slam/frontier_utils.py` | Geteilte Frontier-Erkennung: Zellklassen (0–25 frei, 26–74 unsicher, 75–100 Wand, −1 unbekannt), BFS über freie Zellen, Gruppen-Centroids, footprint-sichere Ziele. Keine ROS-Messages außer OccupancyGrid. |
+| `tb3_slam/map_merging.py` | Pure-numpy-Fusion: feste Ausdehnung, Zell-Priorität (WALL > sticky-FREE > UNCERTAIN > UNKNOWN). Entfernt Roboter-Returns nur innerhalb der bekannten aktuellen Roboter-Footprints. |
+| `tb3_slam/map_merger.py` | Abonniert `/<ns>/map` und globale TF, maskiert aktuelle Roboter-Footprints (0,22 m), publiziert `/map` mit 2 Hz TRANSIENT_LOCAL. |
+| `tb3_slam/frontier_utils.py` | Geteilte Frontier-Erkennung: Zellklassen (0–25 frei, 26–74 unsicher, 75–100 Wand, −1 unbekannt), BFS, footprint-sichere Approach-Ziele mit den zugehörigen Frontier-Gruppen. |
 | `tb3_slam/frontier_viz.py` | RViz-MarkerArray für Frontiers + aktuelles Ziel. Hält ROS-Viz aus `frontier_utils` heraus. |
-| `tb3_slam/multi_robot_explorer.py` | Basis-Node + ROS-freie Typen (`Goal`, `RobotState`, `FrontierCandidate`). Besitzt alle ROS-I/O und Ziel-Überwachung; Subklassen überschreiben nur `select_goals(merged_map, [RobotState])`. |
+| `tb3_slam/multi_robot_explorer.py` | Basis-Node + Typen (`Goal`, `RobotState`, `FrontierCandidate` inklusive Frontier-Zellen). Gemeinsame ROS-I/O und Ziel-Überwachung; Classic besitzt seinen asynchronen Entscheidungsablauf, RL kann `select_goals` überschreiben. |
 | `tb3_slam/path_cost.py` | ROS-freie Helfer für den Nav2-Pfadkosten-Cache (`cost_key`, `path_length`). |
 | `tb3_slam/coverage_monitor.py` | `timeout_for_world_size` (600 s @8 m, 900 s @12 m), Expected-Cells / Coverage. |
 | `tb3_slam/episode_manager.py` | Beobachtet die gemergte `/map`; beendet bei Coverage ≥ Schwelle, stuck (<0,5 %/90 s) oder Timeout; schreibt `/tmp/slam_episode_done`. |
 | `tb3_slam/cmd_vel_relay.py` | Nav2 `/<ns>/cmd_vel_smoothed` (Twist) → `/<ns>/cmd_vel` (TwistStamped, für die Jazzy-gz-Bridge). |
-| `tb3_slam/tf_relay.py` | Visualisierungshilfe: spiegelt `/<ns>/tf` auf globales `/tf`, damit RViz das RobotModel zeigt. Nur mit RViz gestartet. |
+| `tb3_slam/tf_relay.py` | Spiegelt die präfixierten Roboter-TF-Bäume auf globales `/tf` und `/tf_static` für zentrale Explorer und RViz; startet auch headless. Nav2 bleibt pro Roboter isoliert. |
+| `test/test_explorer_launch.py` | Prüft eigenständige Methodenwahl und verfügbare TF-Daten ohne RViz. |
+| `test/test_robot_footprints.py` | Prüft, dass kartierte Mitroboter den eigenen Start nicht blockieren und Wände außerhalb des Footprints erhalten bleiben. |
 
 ### `src/tb3_exploration` — klassische Methode
 
 | Datei | Inhalt |
 |---|---|
-| `tb3_exploration/multi_robot_explorer.py` | `ClassicExplorer` (Node `classic_explorer`): Cost-Utility-Allokator. Baseline erbt aktuell das leere `select_goals`. |
+| `tb3_exploration/multi_robot_explorer.py` | `ClassicExplorer`: asynchrone, pro Roboter serielle Nav2-Pfadprüfung, aktuelle Kartenvalidierung, Greedy-Teamzuweisung, Reservierungen und Wiederanlauf nach Fehlzielen. |
+| `tb3_exploration/cost_utility.py` | NumPy/stdlib-Entscheidungskern: sichtbare Informationszellen und Greedy-Zuweisung mit marginalem Informationsgewinn und normierten Pfadkosten. |
 | `tb3_exploration/frontier_explorer.py` | Alter Single-Robot-Frontier-Node (nicht mehr gelauncht). Referenz für Ziel-Überwachung/Ranking. |
+| `test/test_cost_utility.py` | Deterministische Prüfungen von Sichtbarkeit, Nutzen, Kosten, Teamkopplung und exklusiver Zuweisung. |
+| `test/test_classic_explorer.py` | ROS-/Nav2-Grenztests für Pfadbestätigung, Timeouts, verspätete Antworten, Kartenänderungen und Zielüberwachung. |
 
 ### `src/tb3_reinforced_exploration` — RL-Methode
 

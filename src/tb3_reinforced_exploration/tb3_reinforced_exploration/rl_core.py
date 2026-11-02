@@ -17,6 +17,14 @@ import numpy as np
 
 FEATURE_DIM = 3             # [group_size_norm, path_length_norm, coverage]
 
+# Multi-agent (team-aware) per-frontier features for the centralised explorer.
+# [group_size_norm, path_norm, coverage, teammate_dist_norm, contested]. All
+# normalisers are either already in [0, 1] (coverage, contested) or divide a
+# distance by the *map's own diagonal*, which is read from the live grid — so
+# the same relative frontier yields the same features on 8x8 and 12x12. That
+# size-invariance is what lets the 8x8-trained policy run unchanged on 12x12.
+TEAM_FEATURE_DIM = 5
+
 REPLAY_CAPACITY = 50_000
 BATCH_SIZE = 64
 GAMMA = 0.99
@@ -43,6 +51,36 @@ def make_features(group_size: float,
         group_size / GROUP_SIZE_NORM,
         path_length / PATH_LENGTH_NORM,
         coverage,
+    ], dtype=np.float32)
+
+
+CONTESTED_RADIUS_NORM = 0.1   # teammate goal within 10 % of the diagonal = contested
+
+
+def make_team_features(group_size: float,
+                       path_length: float,
+                       coverage: float,
+                       teammate_dist: float,
+                       map_diagonal: float,
+                       contested: bool) -> np.ndarray:
+    """Size-invariant, team-aware per-frontier features for the team explorer.
+
+    ``path_length`` (this robot's cost to the frontier) and ``teammate_dist``
+    (the other robot's straight-line distance to the same frontier) are both
+    divided by ``map_diagonal`` — the diagonal of the live merged grid in metres
+    — so they stay in roughly [0, 1] regardless of world size. No absolute world
+    coordinate ever enters the vector. ``contested`` is the assignment-status
+    flag (teammate already heading for this frontier).
+
+    Returns ``[group_size_norm, path_norm, coverage, teammate_dist_norm, contested]``.
+    """
+    diag = map_diagonal if map_diagonal > 1e-6 else 1.0
+    return np.array([
+        group_size / GROUP_SIZE_NORM,
+        path_length / diag,
+        coverage,
+        teammate_dist / diag,
+        1.0 if contested else 0.0,
     ], dtype=np.float32)
 
 
@@ -134,8 +172,8 @@ def _require_torch():
     return torch, nn
 
 
-def make_q_network():
-    """Build the pointwise Q-network FEATURE_DIM->64->32->1 as an nn.Module."""
+def make_q_network(feature_dim: int = FEATURE_DIM):
+    """Build the pointwise Q-network feature_dim->64->32->1 as an nn.Module."""
     torch, nn = _require_torch()
 
     class QNetwork(nn.Module):
@@ -144,7 +182,7 @@ def make_q_network():
         def __init__(self) -> None:
             super().__init__()
             self.net = nn.Sequential(
-                nn.Linear(FEATURE_DIM, 64),
+                nn.Linear(feature_dim, 64),
                 nn.ReLU(),
                 nn.Linear(64, 32),
                 nn.ReLU(),
@@ -180,3 +218,146 @@ def select_action(candidates: np.ndarray,
             t = t.to(device)
         q_vals = q_net(t).squeeze(-1)
         return int(q_vals.argmax().item())
+
+
+class TeamLearner:
+    """CTDE learner for the centralised multi-robot explorer.
+
+    Centralised training, decentralised execution: a *single* Q-network scores
+    frontiers for either robot (parameter sharing — the burgers are homogeneous
+    and interchangeable, so one shared set of weights halves the parameters and
+    lets both robots' experience train the same policy), and *one* shared replay
+    buffer pools transitions from both agents. Because the per-robot features are
+    team-aware (teammate distance + contested flag), the shared net still learns
+    to coordinate rather than collide, while execution stays decentralised: at
+    decision time each robot is scored independently on its own candidate set.
+
+    ROS-free so it is unit-testable; torch is imported lazily. The ROS node owns
+    pose/map/Nav2 I/O and feeds (features, reward, next_candidates) in here.
+    """
+
+    def __init__(self,
+                 feature_dim: int = TEAM_FEATURE_DIM,
+                 persist_dir: Path | None = None,
+                 device=None) -> None:
+        torch, _ = _require_torch()
+        import torch.optim as optim
+
+        self.feature_dim = feature_dim
+        self.persist_dir = (persist_dir if persist_dir is not None
+                            else resolve_persist_dir())
+        self.device = (device if device is not None
+                       else torch.device('cuda' if torch.cuda.is_available()
+                                         else 'cpu'))
+
+        self.q_net = make_q_network(feature_dim).to(self.device)
+        self.target_net = make_q_network(feature_dim).to(self.device)
+        self.target_net.load_state_dict(self.q_net.state_dict())
+        self.target_net.eval()
+        self.optimizer = optim.Adam(self.q_net.parameters(), lr=LR)
+
+        self.replay = ReplayBuffer()
+        self.epsilon = EPSILON_START
+        self.step_count = 0
+
+    # -- paths ---------------------------------------------------------
+
+    @property
+    def model_path(self) -> Path:
+        return self.persist_dir / 'model.pt'
+
+    @property
+    def replay_path(self) -> Path:
+        return self.persist_dir / 'replay.pkl'
+
+    @property
+    def meta_path(self) -> Path:
+        return self.persist_dir / 'meta.pkl'
+
+    # -- persistence ---------------------------------------------------
+
+    def load(self) -> None:
+        """Restore network, replay buffer and meta from the persist dir.
+
+        A feature-dim mismatch (e.g. an old 3-feature model) is skipped rather
+        than crashing, so switching feature sets starts fresh instead of failing.
+        """
+        torch, _ = _require_torch()
+        if self.model_path.exists():
+            try:
+                state = torch.load(self.model_path, weights_only=True,
+                                   map_location=self.device)
+                self.q_net.load_state_dict(state)
+                self.target_net.load_state_dict(self.q_net.state_dict())
+            except (RuntimeError, KeyError):
+                pass  # incompatible checkpoint – keep the fresh network
+        self.replay.load(self.replay_path)
+        if self.meta_path.exists():
+            with open(self.meta_path, 'rb') as f:
+                meta = pickle.load(f)
+            self.epsilon = meta.get('epsilon', EPSILON_START)
+            self.step_count = meta.get('step_count', 0)
+
+    def save(self) -> None:
+        """Persist network, replay buffer and meta to the persist dir."""
+        torch, _ = _require_torch()
+        self.persist_dir.mkdir(parents=True, exist_ok=True)
+        torch.save(self.q_net.state_dict(), self.model_path)
+        self.replay.save(self.replay_path)
+        with open(self.meta_path, 'wb') as f:
+            pickle.dump({'epsilon': self.epsilon,
+                         'step_count': self.step_count}, f)
+
+    # -- acting --------------------------------------------------------
+
+    def select_index(self, candidates: np.ndarray,
+                     rng: random.Random | None = None) -> int:
+        """Epsilon-greedy frontier index for one robot's candidate features."""
+        return select_action(candidates, self.epsilon, self.q_net,
+                             self.device, rng)
+
+    # -- learning ------------------------------------------------------
+
+    def push(self, t: Transition) -> None:
+        """Add one agent's transition to the shared replay buffer."""
+        self.replay.push(t)
+
+    def train_step(self) -> float | None:
+        """One gradient step on a shared mini-batch; returns loss or None.
+
+        Returns None (no update) until the buffer holds enough samples. Steps the
+        epsilon schedule and syncs the target net on the usual interval.
+        """
+        torch, nn = _require_torch()
+        if len(self.replay) < max(MIN_REPLAY_SIZE, BATCH_SIZE):
+            return None
+
+        batch = self.replay.sample(BATCH_SIZE)
+        states = torch.FloatTensor(
+            np.stack([t.action_features for t in batch])).to(self.device)
+        rewards = torch.FloatTensor(
+            [t.reward for t in batch]).to(self.device)
+        dones = torch.FloatTensor(
+            [float(t.done) for t in batch]).to(self.device)
+
+        q_current = self.q_net(states).squeeze(-1)
+        with torch.no_grad():
+            q_next = torch.zeros(BATCH_SIZE, device=self.device)
+            for i, t in enumerate(batch):
+                if t.done or not t.next_candidates:
+                    continue
+                nc = torch.FloatTensor(
+                    np.stack(t.next_candidates)).to(self.device)
+                q_next[i] = self.target_net(nc).squeeze(-1).max()
+            q_target = rewards + GAMMA * q_next * (1.0 - dones)
+
+        loss = nn.functional.smooth_l1_loss(q_current, q_target)
+        self.optimizer.zero_grad()
+        loss.backward()
+        self.optimizer.step()
+
+        self.step_count += 1
+        self.epsilon = decay_epsilon(self.epsilon)
+        if self.step_count % TARGET_UPDATE_INTERVAL == 0:
+            self.target_net.load_state_dict(self.q_net.state_dict())
+        return float(loss.item())

@@ -18,9 +18,11 @@ from tb3_reinforced_exploration.rl_core import (
     EPSILON_START,
     FEATURE_DIM,
     make_features,
+    make_team_features,
     ReplayBuffer,
     resolve_persist_dir,
     select_action,
+    TEAM_FEATURE_DIM,
     Transition,
 )
 
@@ -48,6 +50,47 @@ def test_make_features_is_size_invariant():
     small = make_features(group_size=20, path_length=3.0, coverage=0.6)
     large = make_features(group_size=20, path_length=3.0, coverage=0.6)
     np.testing.assert_array_equal(small, large)
+
+
+# ── Team-aware (multi-agent) features ───────────────────────────────
+
+def test_make_team_features_shape_and_normalisation():
+    # diag=10: path 2.5 -> 0.25, teammate 5.0 -> 0.5; group 50/100=0.5.
+    f = make_team_features(
+        group_size=50, path_length=2.5, coverage=0.4,
+        teammate_dist=5.0, map_diagonal=10.0, contested=True,
+    )
+    assert f.dtype == np.float32
+    assert f.shape == (TEAM_FEATURE_DIM,)
+    np.testing.assert_allclose(f, [0.5, 0.25, 0.4, 0.5, 1.0], rtol=1e-6)
+
+
+def test_make_team_features_contested_flag():
+    f = make_team_features(10, 1.0, 0.2, 1.0, 10.0, contested=False)
+    assert f[-1] == 0.0
+
+
+def test_make_team_features_zero_diagonal_is_safe():
+    # A degenerate diagonal must not divide by zero.
+    f = make_team_features(10, 1.0, 0.2, 1.0, 0.0, contested=False)
+    assert np.all(np.isfinite(f))
+
+
+def test_make_team_features_is_size_invariant():
+    # The SAME relative frontier on 8x8 and 12x12: distances scale with the
+    # map diagonal, so dividing by it yields identical features. This is the
+    # transfer property the Studienbericht depends on.
+    diag8 = (8.0 ** 2 * 2) ** 0.5
+    diag12 = (12.0 ** 2 * 2) ** 0.5
+    small = make_team_features(
+        group_size=20, path_length=0.3 * diag8, coverage=0.6,
+        teammate_dist=0.5 * diag8, map_diagonal=diag8, contested=False,
+    )
+    large = make_team_features(
+        group_size=20, path_length=0.3 * diag12, coverage=0.6,
+        teammate_dist=0.5 * diag12, map_diagonal=diag12, contested=False,
+    )
+    np.testing.assert_allclose(small, large, rtol=1e-6)
 
 
 # ── Reward formula ──────────────────────────────────────────────────
@@ -249,3 +292,90 @@ def test_make_q_network_shapes():
     ).make_q_network()
     out = net(torch.zeros((5, FEATURE_DIM)))
     assert tuple(out.shape) == (5, 1)
+
+
+def test_make_q_network_team_feature_dim():
+    torch = pytest.importorskip('torch')
+    from tb3_reinforced_exploration.rl_core import make_q_network
+    net = make_q_network(TEAM_FEATURE_DIM)
+    out = net(torch.zeros((3, TEAM_FEATURE_DIM)))
+    assert tuple(out.shape) == (3, 1)
+
+
+# ── TeamLearner (CTDE: parameter sharing + shared replay) ───────────
+
+def _team_transition(reward: float) -> Transition:
+    feats = np.zeros(TEAM_FEATURE_DIM, dtype=np.float32)
+    return Transition(feats, feats, reward, [feats], False)
+
+
+def test_team_learner_builds_with_team_feature_dim(tmp_path):
+    pytest.importorskip('torch')
+    from tb3_reinforced_exploration.rl_core import TeamLearner
+    learner = TeamLearner(persist_dir=tmp_path)
+    assert learner.feature_dim == TEAM_FEATURE_DIM
+    assert len(learner.replay) == 0
+
+
+def test_team_learner_train_step_noop_until_enough_samples(tmp_path):
+    pytest.importorskip('torch')
+    from tb3_reinforced_exploration.rl_core import TeamLearner
+    learner = TeamLearner(persist_dir=tmp_path)
+    assert learner.train_step() is None  # empty buffer
+
+
+def test_team_learner_train_step_updates_and_decays(tmp_path):
+    pytest.importorskip('torch')
+    from tb3_reinforced_exploration.rl_core import MIN_REPLAY_SIZE, TeamLearner
+    learner = TeamLearner(persist_dir=tmp_path)
+    for i in range(MIN_REPLAY_SIZE + 64):
+        learner.push(_team_transition(float(i % 3)))
+    e_before, steps_before = learner.epsilon, learner.step_count
+    loss = learner.train_step()
+    assert isinstance(loss, float)
+    assert learner.step_count == steps_before + 1
+    assert learner.epsilon <= e_before
+
+
+def test_team_learner_shared_replay_pools_both_agents(tmp_path):
+    # Parameter sharing / shared buffer: transitions from either robot land in
+    # the one buffer the single network trains on.
+    pytest.importorskip('torch')
+    from tb3_reinforced_exploration.rl_core import TeamLearner
+    learner = TeamLearner(persist_dir=tmp_path)
+    learner.push(_team_transition(1.0))   # as if from r1
+    learner.push(_team_transition(2.0))   # as if from r2
+    assert len(learner.replay) == 2
+
+
+def test_team_learner_save_load_roundtrip(tmp_path):
+    pytest.importorskip('torch')
+    from tb3_reinforced_exploration.rl_core import TeamLearner
+    learner = TeamLearner(persist_dir=tmp_path)
+    learner.epsilon = 0.321
+    learner.step_count = 7
+    for i in range(4):
+        learner.push(_team_transition(float(i)))
+    learner.save()
+    assert learner.model_path.exists()
+    assert learner.replay_path.exists()
+    assert learner.meta_path.exists()
+
+    restored = TeamLearner(persist_dir=tmp_path)
+    restored.load()
+    assert restored.epsilon == pytest.approx(0.321)
+    assert restored.step_count == 7
+    assert len(restored.replay) == 4
+
+
+def test_team_learner_load_skips_incompatible_checkpoint(tmp_path):
+    # An old 3-feature model must not crash the 5-feature learner; it is
+    # skipped and training starts fresh.
+    torch = pytest.importorskip('torch')
+    from tb3_reinforced_exploration.rl_core import make_q_network, TeamLearner
+    old = make_q_network(FEATURE_DIM)
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    torch.save(old.state_dict(), tmp_path / 'model.pt')
+    learner = TeamLearner(persist_dir=tmp_path)
+    learner.load()  # must not raise
+    assert learner.feature_dim == TEAM_FEATURE_DIM

@@ -266,6 +266,8 @@ _STALE_PATTERNS = [
     'map_merger',
     'static_transform_publisher',
     'robot_state_publisher',
+    'classic_explorer',
+    'rl_explorer',
 ]
 
 

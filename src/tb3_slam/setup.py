@@ -31,7 +31,6 @@ setup(
     entry_points={
         'console_scripts': [
             'cmd_vel_relay = tb3_slam.cmd_vel_relay:main',
-            'coordinator = tb3_slam.coordinator:main',
             'episode_manager = tb3_slam.episode_manager:main',
             'map_merger = tb3_slam.map_merger:main',
             'tf_relay = tb3_slam.tf_relay:main',

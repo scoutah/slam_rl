@@ -1,17 +1,8 @@
-"""
-RL-based exploration node – Pointwise DQN.
+"""Legacy single-robot pointwise-DQN exploration node (not launched by sim_slam).
 
-Each frontier centroid is scored individually by a small Q-network whose
-input is a per-frontier feature vector:
-
-    [group_size_normalized, path_length, coverage]
-
-The agent picks the centroid with the highest Q-value (epsilon-greedy).
-This lets the network generalise across episodes because the features
-have stable semantics regardless of frontier ordering.
-
-The replay buffer and model are persisted to disk so training
-accumulates across episodes launched by training_runner.py.
+Scores each frontier centroid with a small Q-network over size-invariant features
+and picks epsilon-greedily; model/replay persist across episodes. The learning
+logic lives in ``rl_core`` (ROS-free, unit-tested); this file is the ROS node.
 """
 import math
 from pathlib import Path

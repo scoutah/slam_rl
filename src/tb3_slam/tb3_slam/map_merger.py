@@ -1,3 +1,4 @@
+"""ROS node that fuses each robot's map into the global /map via map_merging."""
 from nav_msgs.msg import OccupancyGrid
 import numpy as np
 import rclpy

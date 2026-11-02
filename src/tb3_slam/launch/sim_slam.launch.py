@@ -1,3 +1,4 @@
+"""Launch the full two-robot SLAM/exploration stack (see README code map for the order)."""
 import os
 from pathlib import Path
 import shlex

@@ -1,3 +1,4 @@
+"""Watch the merged map and signal episode end on coverage, stuck or timeout."""
 from pathlib import Path
 import time
 

@@ -1,4 +1,4 @@
-"""Tests for the coordinator's ROS-free path-cost helpers (path_cost.py)."""
+"""Tests for the explorer's ROS-free path-cost helpers (path_cost.py)."""
 import math
 from types import SimpleNamespace
 

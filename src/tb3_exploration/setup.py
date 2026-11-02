@@ -24,7 +24,8 @@ setup(
     },
     entry_points={
         'console_scripts': [
-            'frontier_explorer = tb3_exploration.frontier_explorer:main'
+            'frontier_explorer = tb3_exploration.frontier_explorer:main',
+            'classic_explorer = tb3_exploration.multi_robot_explorer:main',
         ],
     },
 )

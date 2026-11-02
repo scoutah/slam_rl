@@ -102,8 +102,8 @@ betreffenden Stelle im Code, nicht hier und nicht in langen Datei-Headern.
 
 | Datei | Inhalt |
 |---|---|
-| `tb3_reinforced_exploration/multi_robot_explorer.py` | `RLExplorer` (Node `rl_explorer`): zentraler DQN-Allokator. Baseline erbt aktuell das leere `select_goals`. |
-| `tb3_reinforced_exploration/rl_core.py` | ROS-freier Lernkern: Features, ε-greedy-Policy + Decay, Reward, Replay-Buffer mit Persistenz, Q-Netz, Persist-Dir-Auflösung. Torch lazy importiert. Unit-getestet. |
+| `tb3_reinforced_exploration/multi_robot_explorer.py` | `RLExplorer` (Node `rl_explorer`): zentraler CTDE-Allokator. Überschreibt `select_goals`, weist beiden Robotern je ein distinktes Frontier zu (ein geteiltes Q-Netz, geteilter Replay), Team-Reward (globaler Coverage-Zuwachs), Persistenz über `data_dir`/`$SLAM_RL_DATA_DIR`. |
+| `tb3_reinforced_exploration/rl_core.py` | ROS-freier Lernkern: Features (einzeln + team-aware `make_team_features`), ε-greedy-Policy + Decay, Reward, Replay-Buffer mit Persistenz, Q-Netz (konfigurierbare Feature-Dim), `TeamLearner` (CTDE: Parameter-Sharing + geteilter Buffer), Persist-Dir-Auflösung. Torch lazy importiert. Unit-getestet. |
 | `tb3_reinforced_exploration/rl_agent.py` | Alter Single-Robot-DQN-Node (nicht mehr gelauncht). Nutzt `rl_core`. |
 
 ### Top-Level-Skripte

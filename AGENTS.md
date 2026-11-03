@@ -47,32 +47,47 @@ configurable: it is derived from world size (`coverage_monitor.timeout_for_world
 
 Three ament_python packages in `src/`; the per-file index is the code map in `README.md`.
 
-**Launch order** (`sim_slam.launch.py`, timer-based): world generated in an `OpaqueFunction`
+**Launch order** (`sim_slam.launch.py`): world generated in an `OpaqueFunction`
 (so `world_size` is resolved; skipped if env `SLAM_WORLD_FILE` is set) → gz server (+GUI unless
-headless) + global `/clock` bridge → **per robot `r1`, `r2`** in parallel: spawn + gz bridge +
-`cmd_vel_relay` → 2 s RSP → 5 s Cartographer → 6 s startup spin (12.5 s @0.5 rad/s, ~1 turn) →
-10 s Nav2 → 20 s explorer. `episode_manager` and `map_merger` start immediately.
-`exploration_mode` maps `classic` → `tb3_exploration/classic_explorer`, `rl` →
-`tb3_reinforced_exploration/rl_explorer`, `none` → bare stack. No shared allocator/coordinator node.
+headless) + global `/clock` bridge → **per robot `r1`, `r2`** the pre-Nav2 phase in parallel:
+spawn + gz bridge + `cmd_vel_relay` → 2 s RSP → 5 s Cartographer → 6 s startup spin
+(12.5 s @0.5 rad/s, ~1 turn). **Nav2 runs near-parallel per robot but with a small configure
+offset**: r1's Nav2 at `NAV2_BASE_DELAY` (6 s, right after Cartographer sets up map→odom), r2's at
++`NAV2_CONFIGURE_OFFSET` (4 s → 10 s) so their lifecycle *configure* phases never issue change_state
+concurrently — that overlap was the sole cause of r2's intermittent change_state stall, and it is
+only the first few seconds of each bringup (the earlier fully-serial design needlessly delayed r2
+~25 s). Nav2 comes up via `nav2_slim.launch.py` (not upstream `navigation_launch.py`): only the 5
+nodes the explorer uses are lifecycle-managed — `controller_server`, `planner_server`,
+`behavior_server`, `bt_navigator`, `velocity_smoother`; `smoother_server`/`route_server`/
+`collision_monitor`/`waypoint_follower`/`docking_server` are dropped for faster activation
+(`collision_monitor` is bypassed anyway — `cmd_vel_relay` reads `velocity_smoother`'s
+`cmd_vel_smoothed`). One `nav2_gate` process per robot
+blocks on that robot's `navigate_to_pose`; the explorer launches when the **last** gate exits
+(`OnProcessExit` countdown), i.e. the instant both stacks are active — no fixed explorer delay.
+`episode_manager` and `map_merger` start immediately. `exploration_mode` maps `classic` →
+`tb3_exploration/classic_explorer`, `rl` → `tb3_reinforced_exploration/rl_explorer`, `none` → bare
+stack. No shared allocator/coordinator node.
 
 **Namespacing** (`multi_robot.py`, unit-tested): upstream burger `model.sdf`, bridge yaml,
 `turtlebot3_lds_2d.lua` and `nav2_params.yaml` are rewritten per robot into `/tmp/slam_rl_robots_*/<ns>/`.
 Each robot has its own `/<ns>/{scan,odom,map,cmd_vel,…}` topics and `navigate_to_pose` /
 `compute_path_to_pose` actions, its own TF tree on **`/<ns>/tf`,`/<ns>/tf_static`** (nothing on
-global `/tf` from the robot nodes; the relay mirrors their trees for central consumers;
-every robot node remaps `/tf`→`tf`), and prefixed frames `<ns>/map → <ns>/odom →
+global `/tf`; every node remaps `/tf`→`tf`), and prefixed frames `<ns>/map → <ns>/odom →
 <ns>/base_footprint → …`. `<ns>/map` starts at that robot's spawn pose.
 Inspect: `ros2 run tf2_ros tf2_echo r1/map r1/base_link --ros-args -r /tf:=/r1/tf -r /tf_static:=/r1/tf_static`.
+The explorer base node feeds its TF buffer from each `/<ns>/tf[_static]` directly (plus global
+`/tf_static` for the `map→<ns>/map` offsets), so poses resolve headless without the viz-only
+`tf_relay`, and it dispatches every goal in the robot's own `<ns>/map` frame, since each robot's
+Nav2 cannot transform the merged `map` frame.
 
 **Map merging** (`map_merging.py` numpy + `map_merger.py` node): each `/<ns>/map` is placed by its
 origin plus the robot's spawn pose onto one fixed-extent grid (world +1 m, 0.05 m, frame `map`,
 origin never moves) and fused by per-cell priority. Static `map → <ns>/map` transforms carry the
 spawn offset. Offsets are fixed, so inter-robot Cartographer drift is not corrected (acceptable for
 short 8/12 m episodes — state it in the paper). The detailed rationale (why not `multirobot_map_merge`,
-why the gentle startup spin) lives in `map_merging.py` and `sim_slam.launch.py`.
-Known current robot footprints (0.22 m radius from TF) override fused occupancy to remove
-teammate laser returns that otherwise trap a robot's own frontier seed. This deliberately trusts
-localisation inside the footprint; outside it the wall-first fusion priority is unchanged.
+why the gentle startup spin) lives in `map_merging.py` and `sim_slam.launch.py`. Teammates see each
+other as walls, so `map_merger` frees each robot's current 0.22 m footprint disc
+(`clear_robot_footprints`, poses from `/<ns>/tf` like the explorer — not via `tf_relay`).
 
 **Frontier pipeline** (`frontier_utils.py`, both explorers): cell classes `0–25` free / `26–74`
 uncertain / `75–100` wall / `-1` unknown. A **frontier = FREE cell with an UNCERTAIN cardinal
@@ -87,13 +102,18 @@ a method can override `select_goals(merged_map, [RobotState]) -> {ns: Goal|None}
 (a `Goal` of `None` = leave the robot as is). The base subscribes to the merged `/map`, looks up each
 robot pose, calls `select_goals` every 2 s, dispatches to `/<ns>/navigate_to_pose`, and supervises
 goals (cancel after `goal_timeout` 45 s, or `no_progress_timeout` 8 s without `progress_step` 0.1 m).
-Helpers for subclasses: `candidates_for(robot)` and `path_cost(robot, x, y)`.
-`ClassicExplorer` owns its asynchronous decision rounds: serial confirmed Nav2 plans per robot,
-then greedy cost-utility assignment with marginal visible area, frontier-group reservations,
-latest-map reachability checks and failed-goal memory. It keeps valid active goals stable.
+On every merged-`/map` update it also publishes the union of per-robot frontiers/centroids (plus each
+active goal) as a `MarkerArray` on `/frontiers_viz` for RViz (`frontier_viz.py`), independent of goal
+state and of the chosen method.
+Helpers for subclasses: `candidates_for(robot)` (each `FrontierCandidate` also carries its
+group's `frontier_cells`) and `path_cost(robot, x, y)`. When `episode_manager`'s episode file
+appears (stuck/timeout too), the base stops re-tasking and cancels active goals.
+`ClassicExplorer` owns its asynchronous decision rounds: serial confirmed Nav2 plans per robot
+(requested in the robot's `<ns>/map` frame, like goals), then greedy cost-utility assignment with
+marginal visible area, frontier-group reservations, latest-map reachability checks and failed-goal
+memory (goals cut short by the episode end are not failures). It keeps valid active goals stable.
 See `tb3_exploration/cost_utility.py` for the formula and fixed, size-independent parameters.
-`RLExplorer` on main still has empty selection; its implementation is tracked in #13.
-The TF relay runs even without RViz so the central explorers can resolve both robot poses.
+`RLExplorer` on this branch still has empty selection; its implementation is tracked in #13.
 
 **Coverage / episode end** (`episode_manager.py` on the merged `/map`): coverage = known-free cells
 (0–25) / expected free cells, capped at 1.0. Episode ends on coverage ≥ threshold, <0.5 % gained in

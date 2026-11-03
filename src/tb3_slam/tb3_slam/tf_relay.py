@@ -1,4 +1,10 @@
-"""Relay prefixed robot TF trees to global TF for central explorers and RViz."""
+"""Mirror per-robot ``/<ns>/tf`` onto the global ``/tf`` so RViz can display it.
+
+Robots publish transforms only on ``/<ns>/tf`` (Nav2 multi-robot convention), so
+the global ``/tf`` stays empty and RViz displays that only subscribe to ``/tf``
+(e.g. RobotModel) show nothing. Frames are prefixed, so merging is collision-free.
+Visualisation aid only: launched with RViz, never fed back into a robot stack.
+"""
 
 from __future__ import annotations
 

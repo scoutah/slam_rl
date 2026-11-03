@@ -65,6 +65,11 @@ class EpisodeManager(Node):
         self._last_coverage: float = 0.0
         self._last_coverage_change_time: float = time.time()
 
+        # A file present at startup is always stale (this node is its sole
+        # writer); leaving it makes explorers terminate instantly on the first
+        # watch tick.
+        self._clear_stale_episode_file()
+
         self._coverage_pub = self.create_publisher(Float32, '/episode/coverage', 10)
 
         self.create_subscription(OccupancyGrid, '/map', self._map_callback, 10)
@@ -133,6 +138,14 @@ class EpisodeManager(Node):
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    def _clear_stale_episode_file(self) -> None:
+        stale = Path(self.episode_file)
+        if stale.exists():
+            stale.unlink()
+            self.get_logger().info(
+                f'Removed stale episode file {self.episode_file}'
+            )
 
     def _signal_done(self, *, reason: str, elapsed: float) -> None:
         self._done = True

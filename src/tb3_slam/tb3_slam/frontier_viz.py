@@ -13,6 +13,7 @@ _NAMESPACE = 'frontier_viz'
 _FRONTIER_ID = 0
 _GOAL_ID = 1
 _CENTROID_ID = 2
+_EXTRA_GOAL_ID_BASE = 3
 
 
 def _new_marker(
@@ -32,6 +33,34 @@ def _new_marker(
     return m
 
 
+def _build_goal_marker(
+    marker_id: int,
+    goal: tuple[int, int] | None,
+    map_msg: OccupancyGrid,
+    frame_id: str,
+    stamp: Time | None,
+    color: tuple[float, float, float],
+) -> Marker:
+    res = map_msg.info.resolution
+    goal_marker = _new_marker(marker_id, Marker.CUBE, frame_id, stamp)
+    if goal is None:
+        goal_marker.action = Marker.DELETE
+        return goal_marker
+    goal_marker.action = Marker.ADD
+    goal_marker.scale.x = 1.5 * res
+    goal_marker.scale.y = 1.5 * res
+    goal_marker.scale.z = 0.05
+    goal_marker.color.r = color[0]
+    goal_marker.color.g = color[1]
+    goal_marker.color.b = color[2]
+    goal_marker.color.a = 0.9
+    gx, gy = grid_to_world(goal, map_msg)
+    goal_marker.pose.position.x = gx
+    goal_marker.pose.position.y = gy
+    goal_marker.pose.position.z = 0.025
+    return goal_marker
+
+
 def build_frontier_markers(
     frontiers: list[tuple[int, int]],
     goal: tuple[int, int] | None,
@@ -40,14 +69,19 @@ def build_frontier_markers(
     stamp: Time | None = None,
     centroids: list[tuple[int, int]] | None = None,
     goal_color: tuple[float, float, float] = (0.0, 0.0, 1.0),
+    extra_goals: list[tuple[tuple[int, int] | None, tuple[float, float, float]]]
+    | None = None,
 ) -> MarkerArray:
-    """Return a MarkerArray with frontier cells, optional centroid cubes, and the goal.
+    """Return a MarkerArray with frontier cells, optional centroid cubes, and goals.
 
     - id=0: red CUBE_LIST — frontier cells
-    - id=1: CUBE for the current goal (``goal_color`` RGB, default blue). When
-      ``goal`` is ``None`` the marker uses ``Marker.DELETE``.
+    - id=1: CUBE for the shared ``goal`` (``goal_color`` RGB, default blue).
+      ``Marker.DELETE`` when ``goal`` is ``None``.
     - id=2: blue CUBE_LIST for all candidate centroids. Only present when
       ``centroids`` is not ``None``; otherwise the id=2 slot is omitted.
+    - id>=3: one CUBE per entry in ``extra_goals`` (a ``(cell, rgb)`` pair, in
+      order). A ``None`` cell emits a ``Marker.DELETE`` so stale per-robot goals
+      are cleared.
     """
     res = map_msg.info.resolution
 
@@ -68,22 +102,9 @@ def build_frontier_markers(
         p.z = 0.0
         frontier_marker.points.append(p)
 
-    goal_marker = _new_marker(_GOAL_ID, Marker.CUBE, frame_id, stamp)
-    if goal is None:
-        goal_marker.action = Marker.DELETE
-    else:
-        goal_marker.action = Marker.ADD
-        goal_marker.scale.x = 1.5 * res
-        goal_marker.scale.y = 1.5 * res
-        goal_marker.scale.z = 0.05
-        goal_marker.color.r = goal_color[0]
-        goal_marker.color.g = goal_color[1]
-        goal_marker.color.b = goal_color[2]
-        goal_marker.color.a = 0.9
-        gx, gy = grid_to_world(goal, map_msg)
-        goal_marker.pose.position.x = gx
-        goal_marker.pose.position.y = gy
-        goal_marker.pose.position.z = 0.025
+    goal_marker = _build_goal_marker(
+        _GOAL_ID, goal, map_msg, frame_id, stamp, goal_color,
+    )
 
     arr = MarkerArray()
     arr.markers = [frontier_marker, goal_marker]
@@ -106,5 +127,18 @@ def build_frontier_markers(
             p.z = 0.015
             centroid_marker.points.append(p)
         arr.markers.append(centroid_marker)
+
+    if extra_goals is not None:
+        for offset, (cell, color) in enumerate(extra_goals):
+            arr.markers.append(
+                _build_goal_marker(
+                    _EXTRA_GOAL_ID_BASE + offset,
+                    cell,
+                    map_msg,
+                    frame_id,
+                    stamp,
+                    color,
+                )
+            )
 
     return arr

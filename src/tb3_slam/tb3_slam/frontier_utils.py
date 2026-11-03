@@ -184,7 +184,21 @@ def reachable_goal_cells(
     if not (0 <= sr < rows and 0 <= sc < cols):
         return reachable
     free = (grid >= 0) & (grid <= FREE_MAX)
-    if not free[sr, sc]:
+    # Seed the BFS from the robot cell if it is FREE, else from its FREE
+    # neighbours in a small window. A robot can spawn on a cell that reads as
+    # wall/uncertain (e.g. the south wall bleeding into its footprint under the
+    # lowered WALL_MIN); returning empty there would permanently deny it goals,
+    # so fall back to the nearby free space it can actually drive onto.
+    seeds: list[tuple[int, int]] = []
+    if free[sr, sc]:
+        seeds.append((sr, sc))
+    else:
+        for dr in range(-2, 3):
+            for dc in range(-2, 3):
+                nr, nc = sr + dr, sc + dc
+                if 0 <= nr < rows and 0 <= nc < cols and free[nr, nc]:
+                    seeds.append((nr, nc))
+    if not seeds:
         return reachable
     radius = max(0, clearance_cells)
     padded = np.pad(free, radius, constant_values=False)
@@ -193,11 +207,15 @@ def reachable_goal_cells(
         for dc in range(2 * radius + 1):
             safe &= padded[dr:dr + rows, dc:dc + cols]
     traversable = safe.copy()
-    r0, r1 = max(0, sr - radius), min(rows, sr + radius + 1)
-    c0, c1 = max(0, sc - radius), min(cols, sc + radius + 1)
-    traversable[r0:r1, c0:c1] |= free[r0:r1, c0:c1]
-    reachable[sr, sc] = True
-    queue = deque([(sr, sc)])
+    for seed_r, seed_c in seeds:
+        r0, r1 = max(0, seed_r - radius), min(rows, seed_r + radius + 1)
+        c0, c1 = max(0, seed_c - radius), min(cols, seed_c + radius + 1)
+        traversable[r0:r1, c0:c1] |= free[r0:r1, c0:c1]
+    queue = deque()
+    for seed in seeds:
+        if not reachable[seed]:
+            reachable[seed] = True
+            queue.append(seed)
     while queue:
         r, c = queue.popleft()
         for nr, nc in ((r - 1, c), (r + 1, c), (r, c - 1), (r, c + 1)):

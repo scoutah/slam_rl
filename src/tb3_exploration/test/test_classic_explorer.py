@@ -2,7 +2,7 @@
 from types import SimpleNamespace
 
 from action_msgs.msg import GoalStatus
-from geometry_msgs.msg import PoseStamped
+from geometry_msgs.msg import PoseStamped, TransformStamped
 from nav2_msgs.action import ComputePathToPose
 from nav_msgs.msg import OccupancyGrid
 import numpy as np
@@ -80,6 +80,14 @@ def explorer(monkeypatch):
         now=lambda: Time(seconds=boundary.seconds)))
     monkeypatch.setattr(node, '_robot_pos', lambda io: boundary.positions.get(io.ns))
     node._latest_map = _map()
+    # Identity map -> <ns>/map so request poses keep merged-map coordinates;
+    # the frame (not the offset) is what Nav2 needs, see test below.
+    for ns in node._robots:
+        tf = TransformStamped()
+        tf.header.frame_id = 'map'
+        tf.child_frame_id = f'{ns}/map'
+        tf.transform.rotation.w = 1.0
+        node._tf_buffer.set_transform_static(tf, 'test')
     for io in node._robots.values():
         io.path_client = _Action()
         io.nav_client = _Action()
@@ -121,9 +129,11 @@ def test_plans_are_serial_per_robot_and_navigation_waits_for_confirmed_costs(exp
     left, right = [node._robots[ns].current_goal for ns in ('r1', 'r2')]
     assert left.x < 2.0 and right.x > 4.0
     assert left.path_len > 0 and right.path_len > 0
-    for io in node._robots.values():
+    for ns, io in node._robots.items():
         request = io.nav_client.requests[0].request
-        assert request.pose.header.frame_id == 'map'
+        assert request.pose.header.frame_id == f'{ns}/map'
+        plan = io.path_client.requests[0].request
+        assert plan.start.header.frame_id == plan.goal.header.frame_id == f'{ns}/map'
 
 
 @pytest.mark.parametrize('plan_result', [
@@ -287,3 +297,20 @@ def test_hung_nearest_planner_does_not_starve_other_frontiers(explorer):
     assert planner.requests[1].request.goal.pose.position.x != nearest
     planner.finish_plan(1, length=3.0)
     assert node._robots['r1'].goal_active
+
+
+def test_episode_file_end_stops_ranking_without_marking_failures(explorer, tmp_path):
+    node, _ = explorer
+    node._episode_file = str(tmp_path / 'episode_done')
+    node._decide()
+    _finish_plans(node)
+    assert all(io.goal_active for io in node._robots.values())
+    node._robots['r2'].goal_active = False
+    node._robots['r2'].current_goal = None
+    node._decide()
+    assert node._round is not None
+    (tmp_path / 'episode_done').write_text('reason=stuck')
+    node._watch_episode_end()
+    assert node._round is None
+    assert not any(io.goal_active for io in node._robots.values())
+    assert not any(node._failed.values())

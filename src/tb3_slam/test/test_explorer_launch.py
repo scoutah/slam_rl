@@ -1,4 +1,4 @@
-"""Check standalone method selection and headless TF availability."""
+"""Check standalone method selection and the TF wiring of the launch file."""
 import importlib.util
 from pathlib import Path
 
@@ -29,7 +29,8 @@ def test_mode_selects_its_standalone_explorer(mode, package, executable):
         context, normalize_to_list_of_substitutions(node.node_executable)) == executable
 
 
-def test_headless_exploration_receives_both_robot_tf_trees(monkeypatch):
+def test_tf_relay_is_viz_only(monkeypatch):
+    """Headless runs must not depend on tf_relay (explorer/merger read /<ns>/tf)."""
     module = _launch_module()
     lookup = module.get_package_share_directory
     monkeypatch.setattr(module, 'get_package_share_directory', lambda package:
@@ -41,14 +42,15 @@ def test_headless_exploration_receives_both_robot_tf_trees(monkeypatch):
     relay = next(node for node in description.entities if isinstance(node, Node)
                  and perform_substitutions(context, normalize_to_list_of_substitutions(
                      node.node_executable)) == 'tf_relay')
-    assert relay.condition is None or relay.condition.evaluate(context)
+    assert relay.condition is not None and not relay.condition.evaluate(context)
 
 
-def test_spawn_transform_is_visible_to_each_robots_nav2(monkeypatch):
+def test_spawn_transforms_stay_on_global_tf_static(monkeypatch):
+    """map->ns/map lives on global /tf_static; goals are converted to ns/map instead."""
     module = _launch_module()
     monkeypatch.setattr(module, 'Node', lambda **kwargs: kwargs)
     nodes = module.map_merge_stack([(0.0, -3.0), (1.0, -3.0)], 8.0, True)
     transforms = [node for node in nodes if node['executable'] == 'static_transform_publisher']
     assert len(transforms) == 2
-    for ns, node in zip(('r1', 'r2'), transforms):
-        assert ('/tf_static', f'/{ns}/tf_static') in node.get('remappings', [])
+    for node in transforms:
+        assert not node.get('remappings')

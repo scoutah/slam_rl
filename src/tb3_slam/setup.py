@@ -33,6 +33,7 @@ setup(
             'cmd_vel_relay = tb3_slam.cmd_vel_relay:main',
             'episode_manager = tb3_slam.episode_manager:main',
             'map_merger = tb3_slam.map_merger:main',
+            'nav2_gate = tb3_slam.nav2_gate:main',
             'tf_relay = tb3_slam.tf_relay:main',
         ],
     },

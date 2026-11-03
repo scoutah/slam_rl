@@ -101,10 +101,17 @@ class ClassicExplorer(MultiRobotExplorerNode):
             return
         candidate = self._round[ns].popleft()
         self._planning_candidates[ns] = candidate
+        # Nav2 only knows <ns>/map, so plan in the robot's own frame like _dispatch.
+        io = self._robots[ns]
+        start = self._goal_in_robot_frame(io, *self._round_starts[ns])
+        goal = self._goal_in_robot_frame(io, candidate.x, candidate.y)
+        if start is None or goal is None:
+            self._plan_next(ns, generation)
+            return
         request = ComputePathToPose.Goal()
         request.use_start = True
-        request.start = self._pose_stamped(*self._round_starts[ns])
-        request.goal = self._pose_stamped(candidate.x, candidate.y)
+        request.start = start
+        request.goal = goal
         try:
             future = self._robots[ns].path_client.send_goal_async(request)
         except Exception as error:  # noqa: BLE001
@@ -227,7 +234,9 @@ class ClassicExplorer(MultiRobotExplorerNode):
             self._failed[io.ns].append((io.current_goal.x, io.current_goal.y))
 
     def _cancel_goal(self, io, reason) -> None:
-        if reason != 'episode finished':
+        # Goals cut short by the episode end (coverage or episode_manager's
+        # stuck/timeout file) are not failures of that frontier.
+        if not self._coverage_done:
             self._remember_failure(io)
         self._assigned_frontiers.pop(io.ns, None)
         super()._cancel_goal(io, reason)
@@ -259,6 +268,12 @@ class ClassicExplorer(MultiRobotExplorerNode):
             self._remember_failure(io)
         self._assigned_frontiers.pop(ns, None)
         super()._on_goal_result(future, ns, generation)
+
+    def _watch_episode_end(self) -> None:
+        super()._watch_episode_end()
+        # stuck/timeout end: also stop the in-flight planner ranking round.
+        if self._coverage_done and self._round is not None:
+            self._finish_ranking()
 
     def _finish(self, coverage) -> None:
         super()._finish(coverage)

@@ -77,7 +77,8 @@ betreffenden Stelle im Code, nicht hier und nicht in langen Datei-Headern.
 
 | Datei | Inhalt |
 |---|---|
-| `launch/sim_slam.launch.py` | Timergesteuerter Start des gesamten Stacks: Weltgen → gz → pro Roboter Spawn/Bridge/Relay/RSP/Cartographer/Start-Spin/Nav2 → Map-Merge → Explorer. `exploration_mode:=classic\|rl\|none`. |
+| `launch/sim_slam.launch.py` | Start des gesamten Stacks: Weltgen → gz → pro Roboter Spawn/Bridge/Relay/RSP (2 s)/Cartographer (5 s)/Start-Spin (6 s) (parallel) → Nav2 via `nav2_slim.launch.py` **nahezu parallel, pro Roboter mit kleinem Configure-Versatz** (r1 @6 s, r2 @10 s; keine überlappende change_state-Phase) → Map-Merge → Explorer startet, sobald beide `nav2_gate` beendet sind (kein fester Timer). `exploration_mode:=classic\|rl\|none`. |
+| `launch/nav2_slim.launch.py` | Abgespeckter Nav2-Bringup (Ersatz für Upstream `navigation_launch.py`): lifecycle-managed nur die 5 vom Explorer genutzten Nodes — `controller_server`, `planner_server`, `behavior_server`, `bt_navigator`, `velocity_smoother`. Ausgelassen: `smoother_server`, `route_server`, `collision_monitor` (per `cmd_vel_relay` ohnehin umgangen), `waypoint_follower`, `docking_server` → schnellere, robustere Aktivierung. |
 | `tb3_slam/utils.py` | `generate_random_world` (BSP-Haus, nur Studiengrößen 8/12), `spawn_poses`/`load_spawns`, Welt-Metadaten-I/O. |
 | `tb3_slam/multi_robot.py` | Pure-Python-Namespacing der Upstream-TurtleBot3-Configs (model.sdf / Bridge / Cartographer-lua / Nav2-Params). Unit-getestet, kein ROS. |
 | `tb3_slam/map_merging.py` | Pure-numpy-Fusion: feste Ausdehnung im `map`-Frame, zustandsbehaftete Zell-Priorität (WALL > sticky-FREE > UNCERTAIN > UNKNOWN). Erhält die `frontier_utils`-Zellklassen. |
@@ -90,6 +91,7 @@ betreffenden Stelle im Code, nicht hier und nicht in langen Datei-Headern.
 | `tb3_slam/episode_manager.py` | Beobachtet die gemergte `/map`; beendet bei Coverage ≥ Schwelle, stuck (<0,5 %/90 s) oder Timeout; schreibt `/tmp/slam_episode_done`. |
 | `tb3_slam/cmd_vel_relay.py` | Nav2 `/<ns>/cmd_vel_smoothed` (Twist) → `/<ns>/cmd_vel` (TwistStamped, für die Jazzy-gz-Bridge). |
 | `tb3_slam/tf_relay.py` | Reine Visualisierungshilfe: spiegelt `/<ns>/tf` auf globales `/tf`, damit RViz das RobotModel zeigt. Nur mit RViz gestartet; der Explorer hängt nicht mehr davon ab. |
+| `tb3_slam/nav2_gate.py` | Kurzlebiger Prozess (`nav2_gate --ns <ns>`): blockiert auf `/<ns>/navigate_to_pose`, Exit 0 sobald Nav2 aktiv / Exit 1 bei Timeout. Launch startet beide Gates parallel; der Explorer startet, sobald das letzte Gate beendet ist (`OnProcessExit`-Countdown) — signalbasiert statt per festem Delay. |
 
 ### `src/tb3_exploration` — klassische Methode
 

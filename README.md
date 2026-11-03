@@ -84,12 +84,12 @@ betreffenden Stelle im Code, nicht hier und nicht in langen Datei-Headern.
 | `tb3_slam/map_merger.py` | ROS-Node um `map_merging`: abonniert `/<ns>/map`, publiziert `/map` mit 2 Hz TRANSIENT_LOCAL. |
 | `tb3_slam/frontier_utils.py` | Geteilte Frontier-Erkennung: Zellklassen (0–25 frei, 26–74 unsicher, 75–100 Wand, −1 unbekannt), BFS über freie Zellen, Gruppen-Centroids, footprint-sichere Ziele. Keine ROS-Messages außer OccupancyGrid. |
 | `tb3_slam/frontier_viz.py` | RViz-MarkerArray für Frontiers + aktuelles Ziel. Hält ROS-Viz aus `frontier_utils` heraus. |
-| `tb3_slam/multi_robot_explorer.py` | Basis-Node + ROS-freie Typen (`Goal`, `RobotState`, `FrontierCandidate`). Besitzt alle ROS-I/O und Ziel-Überwachung; Subklassen überschreiben nur `select_goals(merged_map, [RobotState])`. |
+| `tb3_slam/multi_robot_explorer.py` | Basis-Node + ROS-freie Typen (`Goal`, `RobotState`, `FrontierCandidate`). Besitzt alle ROS-I/O und Ziel-Überwachung; publiziert bei jedem `/map`-Update die Frontier-/Centroid-Marker auf `/frontiers_viz`. Speist seinen TF-Buffer direkt aus `/<ns>/tf[_static]` (plus globales `/tf_static` für `map→<ns>/map`), also unabhängig vom Viz-`tf_relay`. Dispatcht Ziele im robotereigenen `<ns>/map`-Frame (Nav2 kennt den gemergten `map`-Frame nicht). Subklassen überschreiben nur `select_goals(merged_map, [RobotState])`. |
 | `tb3_slam/path_cost.py` | ROS-freie Helfer für den Nav2-Pfadkosten-Cache (`cost_key`, `path_length`). |
 | `tb3_slam/coverage_monitor.py` | `timeout_for_world_size` (600 s @8 m, 900 s @12 m), Expected-Cells / Coverage. |
 | `tb3_slam/episode_manager.py` | Beobachtet die gemergte `/map`; beendet bei Coverage ≥ Schwelle, stuck (<0,5 %/90 s) oder Timeout; schreibt `/tmp/slam_episode_done`. |
 | `tb3_slam/cmd_vel_relay.py` | Nav2 `/<ns>/cmd_vel_smoothed` (Twist) → `/<ns>/cmd_vel` (TwistStamped, für die Jazzy-gz-Bridge). |
-| `tb3_slam/tf_relay.py` | Visualisierungshilfe: spiegelt `/<ns>/tf` auf globales `/tf`, damit RViz das RobotModel zeigt. Nur mit RViz gestartet. |
+| `tb3_slam/tf_relay.py` | Reine Visualisierungshilfe: spiegelt `/<ns>/tf` auf globales `/tf`, damit RViz das RobotModel zeigt. Nur mit RViz gestartet; der Explorer hängt nicht mehr davon ab. |
 
 ### `src/tb3_exploration` — klassische Methode
 

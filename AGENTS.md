@@ -49,10 +49,13 @@ Three ament_python packages in `src/`; the per-file index is the code map in `RE
 
 **Launch order** (`sim_slam.launch.py`, timer-based): world generated in an `OpaqueFunction`
 (so `world_size` is resolved; skipped if env `SLAM_WORLD_FILE` is set) → gz server (+GUI unless
-headless) + global `/clock` bridge → **per robot `r1`, `r2`** in parallel: spawn + gz bridge +
+headless) + global `/clock` bridge → **per robot `r1`, `r2`**, each staggered by
+`ROBOT_START_STAGGER` (8 s) so their Nav2 lifecycle bringups don't configure concurrently (the
+overlap intermittently stalled r2's stack on a change_state service timeout): spawn + gz bridge +
 `cmd_vel_relay` → 2 s RSP → 5 s Cartographer → 6 s startup spin (12.5 s @0.5 rad/s, ~1 turn) →
-10 s Nav2 → 20 s explorer. `episode_manager` and `map_merger` start immediately.
-`exploration_mode` maps `classic` → `tb3_exploration/classic_explorer`, `rl` →
+10 s Nav2 (all offset by the robot's stagger) → explorer at `EXPLORER_START_DELAY`
+(20 s + last robot's stagger, i.e. 28 s for two robots). `episode_manager` and `map_merger` start
+immediately. `exploration_mode` maps `classic` → `tb3_exploration/classic_explorer`, `rl` →
 `tb3_reinforced_exploration/rl_explorer`, `none` → bare stack. No shared allocator/coordinator node.
 
 **Namespacing** (`multi_robot.py`, unit-tested): upstream burger `model.sdf`, bridge yaml,
@@ -62,6 +65,10 @@ Each robot has its own `/<ns>/{scan,odom,map,cmd_vel,…}` topics and `navigate_
 global `/tf`; every node remaps `/tf`→`tf`), and prefixed frames `<ns>/map → <ns>/odom →
 <ns>/base_footprint → …`. `<ns>/map` starts at that robot's spawn pose.
 Inspect: `ros2 run tf2_ros tf2_echo r1/map r1/base_link --ros-args -r /tf:=/r1/tf -r /tf_static:=/r1/tf_static`.
+The explorer base node feeds its TF buffer from each `/<ns>/tf[_static]` directly (plus global
+`/tf_static` for the `map→<ns>/map` offsets), so poses resolve headless without the viz-only
+`tf_relay`, and it dispatches every goal in the robot's own `<ns>/map` frame, since each robot's
+Nav2 cannot transform the merged `map` frame.
 
 **Map merging** (`map_merging.py` numpy + `map_merger.py` node): each `/<ns>/map` is placed by its
 origin plus the robot's spawn pose onto one fixed-extent grid (world +1 m, 0.05 m, frame `map`,
@@ -83,9 +90,18 @@ a method is a subclass overriding one method, `select_goals(merged_map, [RobotSt
 (a `Goal` of `None` = leave the robot as is). The base subscribes to the merged `/map`, looks up each
 robot pose, calls `select_goals` every 2 s, dispatches to `/<ns>/navigate_to_pose`, and supervises
 goals (cancel after `goal_timeout` 45 s, or `no_progress_timeout` 8 s without `progress_step` 0.1 m).
-Helpers for subclasses: `candidates_for(robot)` and `path_cost(robot, x, y)`. Both subclasses
-(`ClassicExplorer`, `RLExplorer`) currently inherit the empty `select_goals` (baseline wiring);
-the strategies are layered on later.
+On every merged-`/map` update it also publishes the union of per-robot frontiers/centroids (plus each
+active goal) as a `MarkerArray` on `/frontiers_viz` for RViz (`frontier_viz.py`), independent of goal
+state and of the chosen method.
+Helpers for subclasses: `candidates_for(robot)` and `path_cost(robot, x, y)`. `ClassicExplorer`
+still inherits the empty `select_goals` (cost-utility strategy layered on later); `RLExplorer`
+(`tb3_reinforced_exploration/multi_robot_explorer.py`) overrides `select_goals` with a centralised
+CTDE DQN allocator — one shared Q-net scores each robot's frontiers (`rl_core.py::TeamLearner`,
+ε-greedy, shared replay), goals are assigned greedily so the two robots never double-book a
+frontier, and the shared team-coverage reward trains the net online. It loads a checkpoint from
+`data_dir`/`$SLAM_RL_DATA_DIR` if present (fresh net otherwise) and runs untrained, so
+`exploration_mode:=rl` is testable without prior training — it just acts near-randomly at high ε
+and saves/trains on disk unless pointed at a throwaway `$SLAM_RL_DATA_DIR`.
 
 **Coverage / episode end** (`episode_manager.py` on the merged `/map`): coverage = known-free cells
 (0–25) / expected free cells, capped at 1.0. Episode ends on coverage ≥ threshold, <0.5 % gained in

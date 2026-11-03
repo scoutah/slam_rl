@@ -49,6 +49,30 @@ def merged_grid_spec(world_size: float,
     return GridSpec(cells, cells, -half, -half, resolution)
 
 
+def clear_robot_footprints(
+    grid: np.ndarray, spec: GridSpec, positions: Iterable[tuple[float, float]],
+    radius: float = 0.22,
+) -> None:
+    """Remove teammate laser returns inside each known current robot footprint.
+
+    A robot's body is not a static wall. Without this correction the wall-first
+    merge can permanently trap that robot's own frontier seed. Limit the override
+    to its current Nav2-radius disc; walls outside the footprint retain priority.
+    """
+    for x, y in positions:
+        col = math.floor((x - spec.origin_x) / spec.resolution)
+        row = math.floor((y - spec.origin_y) / spec.resolution)
+        if not (0 <= row < spec.height and 0 <= col < spec.width):
+            continue
+        cells = math.ceil(radius / spec.resolution)
+        r0, r1 = max(0, row - cells), min(spec.height, row + cells + 1)
+        c0, c1 = max(0, col - cells), min(spec.width, col + cells + 1)
+        rr, cc = np.ogrid[r0:r1, c0:c1]
+        inside = ((spec.origin_x + (cc + 0.5) * spec.resolution - x) ** 2
+                  + (spec.origin_y + (rr + 0.5) * spec.resolution - y) ** 2 <= radius ** 2)
+        grid[r0:r1, c0:c1][inside] = 0
+
+
 def fuse_grids(spec: GridSpec,
                layers: Iterable[tuple[np.ndarray, float, float, float]],
                base: np.ndarray | None = None) -> np.ndarray:

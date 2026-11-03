@@ -8,6 +8,7 @@ freely.
 """
 from __future__ import annotations
 
+from collections import defaultdict
 from dataclasses import dataclass
 import math
 import os
@@ -33,9 +34,32 @@ from tb3_slam.frontier_utils import (
     grid_to_world,
     world_to_grid,
 )
+from tb3_slam.frontier_viz import build_frontier_markers
 from tb3_slam.multi_robot import frame, MERGED_MAP_FRAME, ROBOT_NAMESPACES, topic
 from tb3_slam.path_cost import cost_key, path_length
-from tf2_ros import Buffer, TransformListener
+from tf2_geometry_msgs import do_transform_pose
+from tf2_msgs.msg import TFMessage
+from tf2_ros import Buffer
+from visualization_msgs.msg import MarkerArray
+
+_TF_QOS = QoSProfile(
+    depth=100,
+    durability=DurabilityPolicy.VOLATILE,
+    reliability=ReliabilityPolicy.RELIABLE,
+)
+_TF_STATIC_QOS = QoSProfile(
+    depth=100,
+    durability=DurabilityPolicy.TRANSIENT_LOCAL,
+    reliability=ReliabilityPolicy.RELIABLE,
+)
+
+# Per-robot goal-marker colours matching the robot scan colours in sim_slam.rviz
+# (r1 green, r2 orange); robots beyond the table fall back to green.
+_GOAL_COLOR_FALLBACK = (0.0, 1.0, 0.0)
+_ROBOT_GOAL_COLORS: dict[str, tuple[float, float, float]] = defaultdict(
+    lambda: _GOAL_COLOR_FALLBACK,
+    {'r1': (0.0, 1.0, 0.0), 'r2': (1.0, 160 / 255, 0.0)},
+)
 
 
 @dataclass(frozen=True)
@@ -61,12 +85,17 @@ class RobotState:
 
 @dataclass
 class FrontierCandidate:
-    """A navigable frontier centroid on the merged map."""
+    """An approach goal and its underlying frontier cells on the merged map.
+
+    The group cells retain frontier identity when robots need different
+    approach points for the same group.
+    """
 
     cell: tuple[int, int]
     x: float
     y: float
     group_size: int
+    frontier_cells: frozenset[tuple[int, int]] = frozenset()
 
 
 def candidates_for_robot(
@@ -81,7 +110,10 @@ def candidates_for_robot(
     for i, cell in enumerate(centroids):
         wx, wy = grid_to_world(cell, merged_map)
         group_size = sizes[i] if i < len(sizes) else 0
-        candidates.append(FrontierCandidate(cell=cell, x=wx, y=wy, group_size=group_size))
+        candidates.append(FrontierCandidate(
+            cell=cell, x=wx, y=wy, group_size=group_size,
+            frontier_cells=frozenset(stats['centroid_frontiers'][i]),
+        ))
     return candidates
 
 
@@ -89,6 +121,7 @@ def candidates_for_robot(
 class _RobotIO:
     ns: str
     base_frame: str
+    map_frame: str
     nav_client: ActionClient
     path_client: ActionClient
     goal_active: bool = False
@@ -135,13 +168,14 @@ class MultiRobotExplorerNode(Node):
         self._cycle_positions: dict[str, tuple[float, float]] = {}
 
         self._tf_buffer = Buffer()
-        self._tf_listener = TransformListener(self._tf_buffer, self)
+        self._setup_tf_listeners()
 
         self._robots: dict[str, _RobotIO] = {}
         for ns in ROBOT_NAMESPACES:
             self._robots[ns] = _RobotIO(
                 ns=ns,
                 base_frame=frame(ns, 'base_link'),
+                map_frame=frame(ns, 'map'),
                 nav_client=ActionClient(self, NavigateToPose, topic(ns, 'navigate_to_pose')),
                 path_client=ActionClient(
                     self, ComputePathToPose, topic(ns, 'compute_path_to_pose')
@@ -169,11 +203,54 @@ class MultiRobotExplorerNode(Node):
         self._map_sub = self.create_subscription(
             OccupancyGrid, '/map', self._map_callback, map_qos,
         )
+        self._viz_pub = self.create_publisher(MarkerArray, '/frontiers_viz', 10)
 
         self.create_timer(self.get_parameter('decision_period').value, self._decide)
         self.create_timer(1.0, self._supervise_goals)
+        self.create_timer(1.0, self._watch_episode_end)
 
         self.get_logger().info(f'{node_name} ready – waiting for merged /map ...')
+
+    def _watch_episode_end(self) -> None:
+        """Stop acting once the episode is over (file written by episode_manager).
+
+        The base only ends on its own coverage check; episode_manager also ends
+        on stuck/timeout. Honour that file so robots stop being re-tasked after
+        the episode is declared over.
+        """
+        if self._coverage_done or not self._episode_file:
+            return
+        if Path(self._episode_file).exists():
+            self._coverage_done = True
+            for io in self._robots.values():
+                if io.goal_active:
+                    self._cancel_goal(io, reason='episode ended')
+
+    def _setup_tf_listeners(self) -> None:
+        """Feed the shared TF buffer from each robot's /<ns>/tf[_static] tree.
+
+        Robots keep their tree on /<ns>/tf (not global /tf); the static
+        map→<ns>/map offset lives on global /tf_static. Subscribing to all
+        three resolves map→<ns>/base_link without the viz-only tf_relay.
+        """
+        self.create_subscription(
+            TFMessage, '/tf_static', self._tf_static_cb, _TF_STATIC_QOS,
+        )
+        for ns in ROBOT_NAMESPACES:
+            self.create_subscription(
+                TFMessage, f'/{ns}/tf', self._tf_cb, _TF_QOS,
+            )
+            self.create_subscription(
+                TFMessage, f'/{ns}/tf_static', self._tf_static_cb, _TF_STATIC_QOS,
+            )
+
+    def _tf_cb(self, msg: TFMessage) -> None:
+        for transform in msg.transforms:
+            self._tf_buffer.set_transform(transform, 'explorer')
+
+    def _tf_static_cb(self, msg: TFMessage) -> None:
+        for transform in msg.transforms:
+            self._tf_buffer.set_transform_static(transform, 'explorer')
 
     def select_goals(
         self,
@@ -212,11 +289,55 @@ class MultiRobotExplorerNode(Node):
 
     def _map_callback(self, msg: OccupancyGrid) -> None:
         self._latest_map = msg
+        self._publish_frontier_markers(msg)
         if self._coverage_done or self._expected_cells <= 0:
             return
         coverage, _known = check_coverage(msg, self._expected_cells)
         if coverage >= self._coverage_threshold:
             self._finish(coverage)
+
+    def _publish_frontier_markers(self, msg: OccupancyGrid) -> None:
+        """Publish the union of per-robot frontiers/centroids for RViz.
+
+        Each robot's active goal is drawn in that robot's RViz colour (r1 green,
+        r2 orange) so the two goals are distinguishable.
+        """
+        frontier_cells: set[tuple[int, int]] = set()
+        centroid_cells: set[tuple[int, int]] = set()
+        extra_goals: list[
+            tuple[tuple[int, int] | None, tuple[float, float, float]]
+        ] = []
+
+        for ns, io in self._robots.items():
+            pos = self._robot_pos(io)
+            if pos is None:
+                continue
+            robot_grid_pos = world_to_grid(pos[0], pos[1], msg)
+            if robot_grid_pos is None:
+                continue
+            centroids, stats = centroids_from_map_debug(
+                msg, robot_grid_pos=robot_grid_pos,
+            )
+            frontier_cells.update(stats['frontiers'])
+            centroid_cells.update(centroids)
+            goal_cell: tuple[int, int] | None = None
+            if io.current_goal is not None:
+                goal_cell = world_to_grid(
+                    io.current_goal.x, io.current_goal.y, msg,
+                )
+            extra_goals.append((goal_cell, _ROBOT_GOAL_COLORS[ns]))
+
+        self._viz_pub.publish(
+            build_frontier_markers(
+                sorted(frontier_cells),
+                None,
+                msg,
+                frame_id=self._map_frame,
+                stamp=self.get_clock().now().to_msg(),
+                centroids=sorted(centroid_cells),
+                extra_goals=extra_goals,
+            )
+        )
 
     def _robot_pos(self, io: _RobotIO) -> tuple[float, float] | None:
         try:
@@ -251,7 +372,8 @@ class MultiRobotExplorerNode(Node):
 
         if not states:
             self.get_logger().warning(
-                '[explorer] no robot poses yet – waiting for TF',
+                '[explorer] no robot poses yet – waiting for Cartographer to '
+                'publish <ns>/map->odom (benign for the first few seconds)',
                 throttle_duration_sec=5.0,
             )
             return
@@ -288,8 +410,12 @@ class MultiRobotExplorerNode(Node):
             return
         req = ComputePathToPose.Goal()
         req.use_start = True
-        req.start = self._pose_stamped(start[0], start[1])
-        req.goal = self._pose_stamped(goal[0], goal[1])
+        start_pose = self._goal_in_robot_frame(io, start[0], start[1])
+        goal_pose = self._goal_in_robot_frame(io, goal[0], goal[1])
+        if start_pose is None or goal_pose is None:
+            return
+        req.start = start_pose
+        req.goal = goal_pose
         self._cost_pending.add(key)
         future = io.path_client.send_goal_async(req)
         future.add_done_callback(lambda f, k=key: self._on_path_goal_response(f, k))
@@ -317,14 +443,38 @@ class MultiRobotExplorerNode(Node):
             return
         self._cost_cache[key] = (path_length(path), now)
 
-    def _pose_stamped(self, x: float, y: float) -> PoseStamped:
+    def _pose_stamped(self, x: float, y: float, frame_id: str | None = None) -> PoseStamped:
         pose = PoseStamped()
-        pose.header.frame_id = self._map_frame
+        pose.header.frame_id = frame_id or self._map_frame
         pose.header.stamp = self.get_clock().now().to_msg()
         pose.pose.position.x = x
         pose.pose.position.y = y
         pose.pose.orientation.w = 1.0
         return pose
+
+    def _goal_in_robot_frame(self, io: _RobotIO, x: float, y: float) -> PoseStamped | None:
+        """Convert a merged-``map`` point to a goal in the robot's ``<ns>/map`` frame.
+
+        Each robot's Nav2 only knows its own ``<ns>/map`` tree (TF on
+        ``/<ns>/tf``), so a goal stamped ``map`` fails to transform. Returns
+        ``None`` if ``map → <ns>/map`` is not yet in the buffer.
+        """
+        try:
+            tf = self._tf_buffer.lookup_transform(
+                io.map_frame, self._map_frame, rclpy.time.Time(),
+            )
+        except Exception as e:  # noqa: BLE001 - TF raises many unrelated types
+            self.get_logger().warning(
+                f'[{io.ns}] no {self._map_frame}->{io.map_frame} transform: {e}',
+                throttle_duration_sec=5.0,
+            )
+            return None
+        pose = do_transform_pose(self._pose_stamped(x, y).pose, tf)
+        out = PoseStamped()
+        out.header.frame_id = io.map_frame
+        out.header.stamp = self.get_clock().now().to_msg()
+        out.pose = pose
+        return out
 
     def _dispatch(
         self, io: _RobotIO, goal: Goal, robot_pos: tuple[float, float] | None,
@@ -333,6 +483,10 @@ class MultiRobotExplorerNode(Node):
             self.get_logger().warning(
                 f'[{io.ns}] Nav2 not ready – skipping dispatch', throttle_duration_sec=5.0,
             )
+            return
+
+        goal_pose = self._goal_in_robot_frame(io, goal.x, goal.y)
+        if goal_pose is None:
             return
 
         now = self.get_clock().now().nanoseconds * 1e-9
@@ -346,7 +500,7 @@ class MultiRobotExplorerNode(Node):
         generation = io.goal_generation
 
         msg = NavigateToPose.Goal()
-        msg.pose = self._pose_stamped(goal.x, goal.y)
+        msg.pose = goal_pose
 
         dist_str = (
             f'{math.hypot(goal.x - robot_pos[0], goal.y - robot_pos[1]):.2f}m'
@@ -384,7 +538,8 @@ class MultiRobotExplorerNode(Node):
         io = self._robots[ns]
         if generation != io.goal_generation:
             return
-        status: int = future.result().status
+        result = future.result()
+        status: int = result.status
         io.goal_handle = None
         io.goal_active = False
         moved = self._progress_since_dispatch(io)
@@ -399,10 +554,20 @@ class MultiRobotExplorerNode(Node):
             else:
                 self.get_logger().info(f'[{ns}] SUCCEEDED moved={moved_str}')
         elif status == GoalStatus.STATUS_ABORTED:
-            self.get_logger().warning(f'[{ns}] goal ABORTED (moved={moved_str})')
+            self.get_logger().warning(
+                f'[{ns}] goal ABORTED (moved={moved_str}) {self._nav_error(result)}'
+            )
         else:
             self.get_logger().warning(f'[{ns}] goal ended status={status}')
         io.current_goal = None
+
+    @staticmethod
+    def _nav_error(result) -> str:
+        """Nav2 ``error_code``/``error_msg`` from a NavigateToPose result, if any."""
+        res = getattr(result, 'result', None)
+        code = getattr(res, 'error_code', 0)
+        msg = getattr(res, 'error_msg', '') or ''
+        return f'code={code} msg={msg!r}' if code or msg else 'no error detail'
 
     def _cancel_goal(self, io: _RobotIO, reason: str) -> None:
         self.get_logger().info(f'[{io.ns}] cancelling goal – {reason}')

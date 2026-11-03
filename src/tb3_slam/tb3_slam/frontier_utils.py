@@ -184,7 +184,21 @@ def reachable_goal_cells(
     if not (0 <= sr < rows and 0 <= sc < cols):
         return reachable
     free = (grid >= 0) & (grid <= FREE_MAX)
-    if not free[sr, sc]:
+    # Seed the BFS from the robot cell if it is FREE, else from its FREE
+    # neighbours in a small window. A robot can spawn on a cell that reads as
+    # wall/uncertain (e.g. the south wall bleeding into its footprint under the
+    # lowered WALL_MIN); returning empty there would permanently deny it goals,
+    # so fall back to the nearby free space it can actually drive onto.
+    seeds: list[tuple[int, int]] = []
+    if free[sr, sc]:
+        seeds.append((sr, sc))
+    else:
+        for dr in range(-2, 3):
+            for dc in range(-2, 3):
+                nr, nc = sr + dr, sc + dc
+                if 0 <= nr < rows and 0 <= nc < cols and free[nr, nc]:
+                    seeds.append((nr, nc))
+    if not seeds:
         return reachable
     radius = max(0, clearance_cells)
     padded = np.pad(free, radius, constant_values=False)
@@ -193,11 +207,15 @@ def reachable_goal_cells(
         for dc in range(2 * radius + 1):
             safe &= padded[dr:dr + rows, dc:dc + cols]
     traversable = safe.copy()
-    r0, r1 = max(0, sr - radius), min(rows, sr + radius + 1)
-    c0, c1 = max(0, sc - radius), min(cols, sc + radius + 1)
-    traversable[r0:r1, c0:c1] |= free[r0:r1, c0:c1]
-    reachable[sr, sc] = True
-    queue = deque([(sr, sc)])
+    for seed_r, seed_c in seeds:
+        r0, r1 = max(0, seed_r - radius), min(rows, seed_r + radius + 1)
+        c0, c1 = max(0, seed_c - radius), min(cols, seed_c + radius + 1)
+        traversable[r0:r1, c0:c1] |= free[r0:r1, c0:c1]
+    queue = deque()
+    for seed in seeds:
+        if not reachable[seed]:
+            reachable[seed] = True
+            queue.append(seed)
     while queue:
         r, c = queue.popleft()
         for nr, nc in ((r - 1, c), (r + 1, c), (r, c - 1), (r, c + 1)):
@@ -267,6 +285,8 @@ def centroids_from_map_debug(
       - group_sizes (list of ints), dropped_group_sample (up to 3 dropped groups
         with centroid coords + cell value + 3 frontier cells with cardinal
         neighbour values — for understanding why find_centroid returned None)
+      - centroid_frontiers (frontier-cell sets aligned with the approach goals;
+        groups sharing one approach point are combined)
     """
     grid = np.array(msg.data, dtype=np.int8).reshape(msg.info.height, msg.info.width)
     free_seeds = {robot_grid_pos} if robot_grid_pos is not None else None
@@ -291,6 +311,7 @@ def centroids_from_map_debug(
 
     centroids: list[tuple[int, int]] = []
     centroid_group_sizes: list[int] = []
+    centroid_frontiers: list[set[tuple[int, int]]] = []
     dropped_samples: list[dict] = []
     for group in groups:
         centroid = find_centroid(
@@ -299,9 +320,11 @@ def centroids_from_map_debug(
         if centroid is not None:
             if centroid in centroids:
                 centroid_group_sizes[centroids.index(centroid)] += len(group)
+                centroid_frontiers[centroids.index(centroid)].update(group)
             else:
                 centroids.append(centroid)
                 centroid_group_sizes.append(len(group))
+                centroid_frontiers.append(set(group))
         elif len(dropped_samples) < 3:
             n = len(group)
             cr = sum(r for r, _ in group) // n
@@ -339,6 +362,7 @@ def centroids_from_map_debug(
         'n_dropped_groups': len(groups) - len(centroids),
         'group_sizes': [len(g) for g in groups],
         'centroid_group_sizes': centroid_group_sizes,
+        'centroid_frontiers': centroid_frontiers,
         'dropped_group_sample': dropped_samples,
         'frontiers': frontiers,
     }

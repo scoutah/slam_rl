@@ -77,19 +77,21 @@ betreffenden Stelle im Code, nicht hier und nicht in langen Datei-Headern.
 
 | Datei | Inhalt |
 |---|---|
-| `launch/sim_slam.launch.py` | Timergesteuerter Start des gesamten Stacks: Weltgen → gz → pro Roboter Spawn/Bridge/Relay/RSP/Cartographer/Start-Spin/Nav2 → Map-Merge → Explorer. `exploration_mode:=classic\|rl\|none`. |
+| `launch/sim_slam.launch.py` | Start des gesamten Stacks: Weltgen → gz → pro Roboter Spawn/Bridge/Relay/RSP (2 s)/Cartographer (5 s)/Start-Spin (6 s) (parallel) → Nav2 via `nav2_slim.launch.py` **nahezu parallel, pro Roboter mit kleinem Configure-Versatz** (r1 @6 s, r2 @10 s; keine überlappende change_state-Phase) → Map-Merge → Explorer startet, sobald beide `nav2_gate` beendet sind (kein fester Timer). `exploration_mode:=classic\|rl\|none`. |
+| `launch/nav2_slim.launch.py` | Abgespeckter Nav2-Bringup (Ersatz für Upstream `navigation_launch.py`): lifecycle-managed nur die 5 vom Explorer genutzten Nodes — `controller_server`, `planner_server`, `behavior_server`, `bt_navigator`, `velocity_smoother`. Ausgelassen: `smoother_server`, `route_server`, `collision_monitor` (per `cmd_vel_relay` ohnehin umgangen), `waypoint_follower`, `docking_server` → schnellere, robustere Aktivierung. |
 | `tb3_slam/utils.py` | `generate_random_world` (BSP-Haus, nur Studiengrößen 8/12), `spawn_poses`/`load_spawns`, Welt-Metadaten-I/O. |
 | `tb3_slam/multi_robot.py` | Pure-Python-Namespacing der Upstream-TurtleBot3-Configs (model.sdf / Bridge / Cartographer-lua / Nav2-Params). Unit-getestet, kein ROS. |
-| `tb3_slam/map_merging.py` | Pure-numpy-Fusion: feste Ausdehnung im `map`-Frame, zustandsbehaftete Zell-Priorität (WALL > sticky-FREE > UNCERTAIN > UNKNOWN). Erhält die `frontier_utils`-Zellklassen. |
-| `tb3_slam/map_merger.py` | ROS-Node um `map_merging`: abonniert `/<ns>/map`, publiziert `/map` mit 2 Hz TRANSIENT_LOCAL. |
-| `tb3_slam/frontier_utils.py` | Geteilte Frontier-Erkennung: Zellklassen (0–25 frei, 26–74 unsicher, 75–100 Wand, −1 unbekannt), BFS über freie Zellen, Gruppen-Centroids, footprint-sichere Ziele. Keine ROS-Messages außer OccupancyGrid. |
-| `tb3_slam/frontier_viz.py` | RViz-MarkerArray für Frontiers + aktuelles Ziel. Hält ROS-Viz aus `frontier_utils` heraus. |
-| `tb3_slam/multi_robot_explorer.py` | Basis-Node + ROS-freie Typen (`Goal`, `RobotState`, `FrontierCandidate`). Besitzt alle ROS-I/O und Ziel-Überwachung; Subklassen überschreiben nur `select_goals(merged_map, [RobotState])`. |
+| `tb3_slam/map_merging.py` | Pure-numpy-Fusion: feste Ausdehnung im `map`-Frame, zustandsbehaftete Zell-Priorität (WALL > sticky-FREE > UNCERTAIN > UNKNOWN). Erhält die `frontier_utils`-Zellklassen. `clear_robot_footprints` gibt die aktuelle Footprint-Scheibe (0,22 m) jedes Roboters frei, damit ein Teamkollege, der ihn als Wand sieht, seinen Frontier-Seed nicht dauerhaft blockiert. |
+| `tb3_slam/map_merger.py` | ROS-Node um `map_merging`: abonniert `/<ns>/map`, publiziert `/map` mit 2 Hz TRANSIENT_LOCAL. Liest Roboterposen aus `/<ns>/tf[_static]` + globalem `/tf_static` (unabhängig vom Viz-`tf_relay`) für `clear_robot_footprints`. |
+| `tb3_slam/frontier_utils.py` | Geteilte Frontier-Erkennung: Zellklassen (0–25 frei, 26–74 unsicher, 75–100 Wand, −1 unbekannt), BFS über freie Zellen, Gruppen-Centroids (+ zugehörige Frontier-Zellen `centroid_frontiers`), footprint-sichere Ziele; BFS-Seed fällt auf freie Nachbarzellen zurück, wenn die Roboterzelle nicht frei ist. Keine ROS-Messages außer OccupancyGrid. |
+| `tb3_slam/frontier_viz.py` | RViz-MarkerArray für Frontiers, Centroids und je Roboter ein farbiges Ziel (`extra_goals`). Hält ROS-Viz aus `frontier_utils` heraus. |
+| `tb3_slam/multi_robot_explorer.py` | Basis-Node + ROS-freie Typen (`Goal`, `RobotState`, `FrontierCandidate`). Besitzt alle ROS-I/O und Ziel-Überwachung; publiziert bei jedem `/map`-Update die Frontier-/Centroid-Marker auf `/frontiers_viz`. Speist seinen TF-Buffer direkt aus `/<ns>/tf[_static]` (plus globales `/tf_static` für `map→<ns>/map`), also unabhängig vom Viz-`tf_relay`. Dispatcht Ziele im robotereigenen `<ns>/map`-Frame (Nav2 kennt den gemergten `map`-Frame nicht). Subklassen überschreiben nur `select_goals(merged_map, [RobotState])`. |
 | `tb3_slam/path_cost.py` | ROS-freie Helfer für den Nav2-Pfadkosten-Cache (`cost_key`, `path_length`). |
 | `tb3_slam/coverage_monitor.py` | `timeout_for_world_size` (600 s @8 m, 900 s @12 m), Expected-Cells / Coverage. |
-| `tb3_slam/episode_manager.py` | Beobachtet die gemergte `/map`; beendet bei Coverage ≥ Schwelle, stuck (<0,5 %/90 s) oder Timeout; schreibt `/tmp/slam_episode_done`. |
+| `tb3_slam/episode_manager.py` | Beobachtet die gemergte `/map`; beendet bei Coverage ≥ Schwelle, stuck (<0,5 %/90 s) oder Timeout; schreibt `/tmp/slam_episode_done` (löscht beim Start eine veraltete Datei; der Explorer bricht beim Erscheinen der Datei seine Ziele ab). |
 | `tb3_slam/cmd_vel_relay.py` | Nav2 `/<ns>/cmd_vel_smoothed` (Twist) → `/<ns>/cmd_vel` (TwistStamped, für die Jazzy-gz-Bridge). |
-| `tb3_slam/tf_relay.py` | Visualisierungshilfe: spiegelt `/<ns>/tf` auf globales `/tf`, damit RViz das RobotModel zeigt. Nur mit RViz gestartet. |
+| `tb3_slam/tf_relay.py` | Reine Visualisierungshilfe: spiegelt `/<ns>/tf` auf globales `/tf`, damit RViz das RobotModel zeigt. Nur mit RViz gestartet; der Explorer hängt nicht mehr davon ab. |
+| `tb3_slam/nav2_gate.py` | Kurzlebiger Prozess (`nav2_gate --ns <ns>`): blockiert auf `/<ns>/navigate_to_pose`, Exit 0 sobald Nav2 aktiv / Exit 1 bei Timeout. Launch startet beide Gates parallel; der Explorer startet, sobald das letzte Gate beendet ist (`OnProcessExit`-Countdown) — signalbasiert statt per festem Delay. |
 
 ### `src/tb3_exploration` — klassische Methode
 

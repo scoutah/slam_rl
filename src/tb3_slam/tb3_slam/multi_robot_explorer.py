@@ -364,7 +364,8 @@ class MultiRobotExplorerNode(Node):
 
         if not states:
             self.get_logger().warning(
-                '[explorer] no robot poses yet – waiting for TF',
+                '[explorer] no robot poses yet – waiting for Cartographer to '
+                'publish <ns>/map->odom (benign for the first few seconds)',
                 throttle_duration_sec=5.0,
             )
             return

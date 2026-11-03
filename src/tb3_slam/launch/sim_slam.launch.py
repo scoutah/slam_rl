@@ -13,10 +13,12 @@ from launch.actions import (
     GroupAction,
     IncludeLaunchDescription,
     OpaqueFunction,
+    RegisterEventHandler,
     SetEnvironmentVariable,
     TimerAction,
 )
 from launch.conditions import IfCondition, UnlessCondition
+from launch.event_handlers import OnProcessExit
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node, PushRosNamespace
@@ -48,11 +50,19 @@ TF_REMAPS = [('/tf', 'tf'), ('/tf_static', 'tf_static')]
 
 CARTOGRAPHER_LUA = 'turtlebot3_lds_2d.lua'
 
-# Per-robot start offset so the robots' Nav2 lifecycle bringups do not overlap.
-ROBOT_START_STAGGER = 8.0
-# Explorer waits for the last (most-delayed) robot's Nav2, keeping the original
-# ~10 s margin after Nav2 (fires at 10 s + offset) before goals are dispatched.
-EXPLORER_START_DELAY = 20.0 + (len(ROBOT_NAMESPACES) - 1) * ROBOT_START_STAGGER
+# Each robot runs spawn→bridge→RSP→Cartographer→startup-spin in parallel; Nav2 is
+# then brought up per robot via nav2_slim.launch.py (only the 5 nodes the explorer
+# uses — see that file). The two Nav2 bringups run near-parallel but with a small
+# per-robot configure offset (NAV2_BASE_DELAY + i*NAV2_CONFIGURE_OFFSET) so their
+# lifecycle change_state phases never overlap — that overlap was the sole cause of
+# r2's intermittent change_state stall. One nav2_gate process per robot blocks on
+# that robot's navigate_to_pose; the explorer launches (OnProcessExit countdown)
+# the instant the last gate exits, i.e. when both stacks are active — no fixed
+# explorer delay.
+#
+# Pre-Nav2 nodes use short fixed timers (no lifecycle race): RSP at 2 s,
+# Cartographer at 5 s, startup spin at 6 s; r1 Nav2 at 6 s, r2 at 10 s.
+GATE_TIMEOUT_S = 120.0  # nav2_gate gives up (exit 1) if Nav2 never comes up
 
 
 def prepare_world(world_size: float) -> tuple[str, list[tuple[float, float]]]:
@@ -132,13 +142,14 @@ def write_robot_configs(ns: str, out_dir: Path) -> dict[str, str]:
 
 
 def robot_stack(ns: str, spawn: tuple[float, float], configs: dict[str, str],
-                use_sim_time, start_offset: float = 0.0) -> list:
-    """Timer-sequenced simulation stack of one robot inside namespace ns.
+                use_sim_time) -> tuple[list, GroupAction]:
+    """Build one robot's simulation stack inside namespace ``ns``.
 
-    spawn + bridge → 2 s robot_state_publisher → 5 s Cartographer
-    → 6 s startup spin → 10 s Nav2. cmd_vel_relay starts immediately.
-    ``start_offset`` shifts the whole sequence so the two robots' Nav2 bringups
-    do not configure concurrently (that race intermittently stalls r2's stack).
+    Returns ``(pre_nav2_actions, nav2)``: the pre-Nav2 actions start immediately
+    (spawn + bridge + cmd_vel_relay now; RSP @2 s, Cartographer @5 s, startup
+    spin @6 s via short fixed timers — these have no lifecycle race). The ``nav2``
+    GroupAction is returned separately so ``launch_world`` can serialise the two
+    robots' Nav2 bringups behind readiness gates instead of starting it here.
     """
     spawn_x, spawn_y = spawn
 
@@ -205,8 +216,8 @@ def robot_stack(ns: str, spawn: tuple[float, float], configs: dict[str, str],
         output='log',
     )
 
-    # Publishes TwistStamped for 4 s so Cartographer can map free cells
-    # before the exploration nodes start looking for frontiers.
+    # Publishes TwistStamped for 12.5 s (125 msgs @10 Hz, 0.5 rad/s ≈ one turn)
+    # so Cartographer can map free cells before the explorer looks for frontiers.
     startup_spin = ExecuteProcess(
         cmd=[
             'ros2', 'topic', 'pub',
@@ -219,13 +230,13 @@ def robot_stack(ns: str, spawn: tuple[float, float], configs: dict[str, str],
         output='log',
     )
 
-    # navigation_launch.py does not push the namespace itself (bringup_launch
-    # does), so wrap it; it remaps /tf -> tf and roots the params at ns.
+    # nav2_slim.launch.py (our trimmed bringup) does not push the namespace
+    # itself, so wrap it; it remaps /tf -> tf and roots the params at ns.
     nav2 = GroupAction([
         PushRosNamespace(ns),
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(os.path.join(
-                get_package_share_directory('nav2_bringup'), 'launch', 'navigation_launch.py',
+                get_package_share_directory('tb3_slam'), 'launch', 'nav2_slim.launch.py',
             )),
             launch_arguments={
                 'namespace': ns,
@@ -251,15 +262,32 @@ def robot_stack(ns: str, spawn: tuple[float, float], configs: dict[str, str],
         }],
     )
 
-    return [
-        spawn_robot,
-        bridge,
-        cmd_vel_relay,
-        TimerAction(period=2.0 + start_offset, actions=[robot_state_publisher]),
-        TimerAction(period=5.0 + start_offset, actions=[cartographer, occupancy_grid]),
-        TimerAction(period=6.0 + start_offset, actions=[startup_spin]),
-        TimerAction(period=10.0 + start_offset, actions=[nav2]),
-    ]
+    return (
+        [
+            spawn_robot,
+            bridge,
+            cmd_vel_relay,
+            TimerAction(period=2.0, actions=[robot_state_publisher]),
+            TimerAction(period=5.0, actions=[cartographer, occupancy_grid]),
+            TimerAction(period=6.0, actions=[startup_spin]),
+        ],
+        nav2,
+    )
+
+
+def nav2_gate_process(ns: str) -> ExecuteProcess:
+    """Short-lived process that blocks until ``<ns>``'s Nav2 is active.
+
+    Exits 0 the moment ``/<ns>/navigate_to_pose`` is available, exit 1 on
+    timeout. Used to chain the robots' Nav2 bringups (OnProcessExit) so they
+    serialise on a real readiness signal instead of a fixed wall-clock offset.
+    """
+    return ExecuteProcess(
+        cmd=['ros2', 'run', 'tb3_slam', 'nav2_gate',
+             '--ns', ns, '--timeout', str(GATE_TIMEOUT_S)],
+        name=f'nav2_gate_{ns}',
+        output='screen',
+    )
 
 
 def map_merge_stack(spawns: list[tuple[float, float]], world_size: float,
@@ -366,16 +394,61 @@ def generate_launch_description():
             output='log',
         )
         config_dir = Path(tempfile.mkdtemp(prefix='slam_rl_robots_'))
-        robots = []
-        # Stagger each robot's start so their Nav2 lifecycle bringups do not
-        # configure concurrently (see robot_stack docstring).
-        for i, (ns, spawn) in enumerate(zip(ROBOT_NAMESPACES, spawns)):
-            robots += robot_stack(
-                ns, spawn, write_robot_configs(ns, config_dir),
-                use_sim_time, start_offset=i * ROBOT_START_STAGGER,
+
+        # Each robot's pre-Nav2 phase starts in parallel; their Nav2 bringups are
+        # serialised behind readiness gates so they never configure concurrently.
+        pre_nav2_actions: list = []
+        nav2_by_ns: dict[str, GroupAction] = {}
+        for ns, spawn in zip(ROBOT_NAMESPACES, spawns):
+            pre, nav2 = robot_stack(
+                ns, spawn, write_robot_configs(ns, config_dir), use_sim_time,
             )
+            pre_nav2_actions += pre
+            nav2_by_ns[ns] = nav2
+
+        # Nav2 bringups run (almost) in parallel for speed, but their lifecycle
+        # *configure* phases are decoupled by a small per-robot offset so they
+        # never issue change_state concurrently — that overlap was the only
+        # cause of r2's intermittent change_state stall, and it is just the
+        # first few seconds of each bringup, not the whole thing. Waiting for
+        # r1 to be fully active (the earlier serial design) needlessly delayed
+        # r2 by ~25 s; a small offset removes the race at near-zero cost.
+        #
+        # The explorer still starts on a real readiness signal: one nav2_gate
+        # per robot blocks on that robot's navigate_to_pose, and the explorer
+        # launches once *both* gates have exited (whichever finishes last).
+        NAV2_BASE_DELAY = 6.0         # r1 Nav2 right after Cartographer (5 s) sets up map->odom TF
+        NAV2_CONFIGURE_OFFSET = 4.0   # stagger per robot so configure phases don't overlap
+
+        chain: list = []
+        gates: list[ExecuteProcess] = []
+        for i, ns in enumerate(ROBOT_NAMESPACES):
+            chain.append(TimerAction(
+                period=NAV2_BASE_DELAY + i * NAV2_CONFIGURE_OFFSET,
+                actions=[nav2_by_ns[ns]],
+            ))
+            gates.append(nav2_gate_process(ns))
+
+        # Start all gates immediately (they just block on their action server),
+        # and launch the explorer when the last one still running exits. A tiny
+        # countdown closure fires launch_explorers on the final gate exit.
+        remaining = {'n': len(gates)}
+
+        def _on_gate_exit(*_args, **_kwargs):
+            remaining['n'] -= 1
+            if remaining['n'] == 0:
+                return [OpaqueFunction(function=launch_explorers)]
+            return []
+
+        chain += gates
+        for gate in gates:
+            chain.append(RegisterEventHandler(OnProcessExit(
+                target_action=gate,
+                on_exit=_on_gate_exit,
+            )))
+
         return [
-            gzserver_cmd, clock_bridge, *robots,
+            gzserver_cmd, clock_bridge, *pre_nav2_actions, *chain,
             *map_merge_stack(spawns, load_world_size(WORLD_META_FILE), use_sim_time),
         ]
 
@@ -482,10 +555,9 @@ def generate_launch_description():
 
     inject_venv = AppendEnvironmentVariable('PYTHONPATH', _venv_site)
 
-    exploration_delayed = TimerAction(
-        period=EXPLORER_START_DELAY,
-        actions=[OpaqueFunction(function=launch_explorers)],
-    )
+    # The explorer is no longer time-triggered: launch_world chains it onto the
+    # last robot's Nav2 readiness gate (OnProcessExit), so it starts the instant
+    # both robots' Nav2 stacks are active instead of after a fixed delay.
 
     return LaunchDescription([
         # Suppress verbose logs from Cartographer, Nav2, robot_state_publisher etc.
@@ -498,5 +570,4 @@ def generate_launch_description():
         rviz_node,
         tf_relay_node,
         episode_manager,
-        exploration_delayed,
     ])

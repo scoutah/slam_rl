@@ -47,16 +47,26 @@ configurable: it is derived from world size (`coverage_monitor.timeout_for_world
 
 Three ament_python packages in `src/`; the per-file index is the code map in `README.md`.
 
-**Launch order** (`sim_slam.launch.py`, timer-based): world generated in an `OpaqueFunction`
+**Launch order** (`sim_slam.launch.py`): world generated in an `OpaqueFunction`
 (so `world_size` is resolved; skipped if env `SLAM_WORLD_FILE` is set) → gz server (+GUI unless
-headless) + global `/clock` bridge → **per robot `r1`, `r2`**, each staggered by
-`ROBOT_START_STAGGER` (8 s) so their Nav2 lifecycle bringups don't configure concurrently (the
-overlap intermittently stalled r2's stack on a change_state service timeout): spawn + gz bridge +
-`cmd_vel_relay` → 2 s RSP → 5 s Cartographer → 6 s startup spin (12.5 s @0.5 rad/s, ~1 turn) →
-10 s Nav2 (all offset by the robot's stagger) → explorer at `EXPLORER_START_DELAY`
-(20 s + last robot's stagger, i.e. 28 s for two robots). `episode_manager` and `map_merger` start
-immediately. `exploration_mode` maps `classic` → `tb3_exploration/classic_explorer`, `rl` →
-`tb3_reinforced_exploration/rl_explorer`, `none` → bare stack. No shared allocator/coordinator node.
+headless) + global `/clock` bridge → **per robot `r1`, `r2`** the pre-Nav2 phase in parallel:
+spawn + gz bridge + `cmd_vel_relay` → 2 s RSP → 5 s Cartographer → 6 s startup spin
+(12.5 s @0.5 rad/s, ~1 turn). **Nav2 runs near-parallel per robot but with a small configure
+offset**: r1's Nav2 at `NAV2_BASE_DELAY` (6 s, right after Cartographer sets up map→odom), r2's at
++`NAV2_CONFIGURE_OFFSET` (4 s → 10 s) so their lifecycle *configure* phases never issue change_state
+concurrently — that overlap was the sole cause of r2's intermittent change_state stall, and it is
+only the first few seconds of each bringup (the earlier fully-serial design needlessly delayed r2
+~25 s). Nav2 comes up via `nav2_slim.launch.py` (not upstream `navigation_launch.py`): only the 5
+nodes the explorer uses are lifecycle-managed — `controller_server`, `planner_server`,
+`behavior_server`, `bt_navigator`, `velocity_smoother`; `smoother_server`/`route_server`/
+`collision_monitor`/`waypoint_follower`/`docking_server` are dropped for faster activation
+(`collision_monitor` is bypassed anyway — `cmd_vel_relay` reads `velocity_smoother`'s
+`cmd_vel_smoothed`). One `nav2_gate` process per robot
+blocks on that robot's `navigate_to_pose`; the explorer launches when the **last** gate exits
+(`OnProcessExit` countdown), i.e. the instant both stacks are active — no fixed explorer delay.
+`episode_manager` and `map_merger` start immediately. `exploration_mode` maps `classic` →
+`tb3_exploration/classic_explorer`, `rl` → `tb3_reinforced_exploration/rl_explorer`, `none` → bare
+stack. No shared allocator/coordinator node.
 
 **Namespacing** (`multi_robot.py`, unit-tested): upstream burger `model.sdf`, bridge yaml,
 `turtlebot3_lds_2d.lua` and `nav2_params.yaml` are rewritten per robot into `/tmp/slam_rl_robots_*/<ns>/`.

@@ -36,7 +36,29 @@ RESULTS_DIR = PROJECT_ROOT / 'results'
 WORLDS_DIR = PROJECT_ROOT / 'worlds'
 
 # ROS node name substrings whose log lines are suppressed in the terminal
-LOG_FILTER: list[str] = ['cartographer_node-8', 'controller_server-12']
+LOG_FILTER: list[str] = [
+    'cartographer_node-',
+    'controller_server-',
+    'rviz2-',
+    'gazebo-',
+    'parameter_bridge-',
+    'create-',
+    'cmd_vel_relay-',
+    'static_transform_publisher-',
+    'tf_relay-',
+    'map_merger-',
+    'robot_state_publisher-',
+    'lifecycle_manager-',
+    'smoother_server-',
+    'route_server-',
+    'behavior_server-',
+    'waypoint_follower-',
+    'velocity_smoother-',
+    'collision_monitor-',
+    'opennav_docking-',
+    'bt_navigator-',
+    'planner_server-',
+]
 
 
 # ---------------------------------------------------------------------------
@@ -44,12 +66,13 @@ LOG_FILTER: list[str] = ['cartographer_node-8', 'controller_server-12']
 # ---------------------------------------------------------------------------
 
 def _stream_filter(src: io.RawIOBase, dst: io.TextIOWrapper) -> None:
-    """Read *src* line by line, writing to *dst* unless the line matches LOG_FILTER."""
+    """Read *src* line by line, writing to *dst* unless it matches a filter."""
     for raw in iter(src.readline, b''):
         line = raw.decode('utf-8', errors='replace')
-        if not any(f in line for f in LOG_FILTER):
-            dst.write(line)
-            dst.flush()
+        if any(f in line for f in LOG_FILTER):
+            continue
+        dst.write(line)
+        dst.flush()
 
 
 def start_filtered_readers(proc: subprocess.Popen) -> list[threading.Thread]:
@@ -288,7 +311,7 @@ def run(
     print(f'         world    → {world_file}' + (' (new each episode)' if randomize_worlds else ''))
     print(f'         world size: {read_world_size(world_file) or "unknown"} m')
     print(f'         results  → {result_file}')
-    print(f'         filtered nodes: {LOG_FILTER}')
+    print(f'         filtered nodes: {len(LOG_FILTER)} suppressed')
 
     stats: list[dict] = []
 

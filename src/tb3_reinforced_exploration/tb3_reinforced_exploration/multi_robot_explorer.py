@@ -108,6 +108,13 @@ class RLExplorer(MultiRobotExplorerNode):
         claimed: list[tuple[float, float]] = []
 
         for robot in robots:
+            # Keep a busy robot on its current goal instead of re-rolling a new
+            # (random at high epsilon) frontier every cycle; still reserve its
+            # claim so the teammate won't double-book it.
+            if robot.busy and robot.current_goal is not None:
+                claimed.append((robot.current_goal.x, robot.current_goal.y))
+                continue
+
             # Decentralised execution: this robot is scored on its own
             # candidate set, minus frontiers already claimed this cycle.
             candidates = [

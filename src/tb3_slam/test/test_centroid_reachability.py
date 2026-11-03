@@ -94,3 +94,17 @@ def test_free_robot_can_leave_incompletely_mapped_current_footprint():
 
 def test_start_in_long_narrow_corridor_does_not_jump_to_another_safe_region():
     assert find_centroid([(40, 88)], _rooms(5), (40, 50)) is None
+
+
+def test_robot_on_nonfree_cell_with_free_ahead_still_gets_goal():
+    """A robot whose own footprint reads wall (spawn bleeding) still explores.
+
+    r2 spawns against the south wall; under the lowered WALL_MIN its cell can
+    read >=75 while free space lies just ahead. Seeding from the free
+    neighbours (not giving up) must still yield a reachable goal.
+    """
+    grid = _rooms(20)
+    grid[40, 15] = 80  # robot cell now reads as wall
+    goal = find_centroid([(40, 88)], grid, (40, 15))
+    assert goal is not None
+    assert goal in _reachable(grid, (41, 15))

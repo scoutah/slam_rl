@@ -48,6 +48,12 @@ TF_REMAPS = [('/tf', 'tf'), ('/tf_static', 'tf_static')]
 
 CARTOGRAPHER_LUA = 'turtlebot3_lds_2d.lua'
 
+# Per-robot start offset so the robots' Nav2 lifecycle bringups do not overlap.
+ROBOT_START_STAGGER = 8.0
+# Explorer waits for the last (most-delayed) robot's Nav2, keeping the original
+# ~10 s margin after Nav2 (fires at 10 s + offset) before goals are dispatched.
+EXPLORER_START_DELAY = 20.0 + (len(ROBOT_NAMESPACES) - 1) * ROBOT_START_STAGGER
+
 
 def prepare_world(world_size: float) -> tuple[str, list[tuple[float, float]]]:
     """Return (world_file, robot_spawns) for this launch.
@@ -126,11 +132,13 @@ def write_robot_configs(ns: str, out_dir: Path) -> dict[str, str]:
 
 
 def robot_stack(ns: str, spawn: tuple[float, float], configs: dict[str, str],
-                use_sim_time) -> list:
+                use_sim_time, start_offset: float = 0.0) -> list:
     """Timer-sequenced simulation stack of one robot inside namespace ns.
 
     spawn + bridge → 2 s robot_state_publisher → 5 s Cartographer
     → 6 s startup spin → 10 s Nav2. cmd_vel_relay starts immediately.
+    ``start_offset`` shifts the whole sequence so the two robots' Nav2 bringups
+    do not configure concurrently (that race intermittently stalls r2's stack).
     """
     spawn_x, spawn_y = spawn
 
@@ -247,10 +255,10 @@ def robot_stack(ns: str, spawn: tuple[float, float], configs: dict[str, str],
         spawn_robot,
         bridge,
         cmd_vel_relay,
-        TimerAction(period=2.0, actions=[robot_state_publisher]),
-        TimerAction(period=5.0, actions=[cartographer, occupancy_grid]),
-        TimerAction(period=6.0, actions=[startup_spin]),
-        TimerAction(period=10.0, actions=[nav2]),
+        TimerAction(period=2.0 + start_offset, actions=[robot_state_publisher]),
+        TimerAction(period=5.0 + start_offset, actions=[cartographer, occupancy_grid]),
+        TimerAction(period=6.0 + start_offset, actions=[startup_spin]),
+        TimerAction(period=10.0 + start_offset, actions=[nav2]),
     ]
 
 
@@ -359,8 +367,13 @@ def generate_launch_description():
         )
         config_dir = Path(tempfile.mkdtemp(prefix='slam_rl_robots_'))
         robots = []
-        for ns, spawn in zip(ROBOT_NAMESPACES, spawns):
-            robots += robot_stack(ns, spawn, write_robot_configs(ns, config_dir), use_sim_time)
+        # Stagger each robot's start so their Nav2 lifecycle bringups do not
+        # configure concurrently (see robot_stack docstring).
+        for i, (ns, spawn) in enumerate(zip(ROBOT_NAMESPACES, spawns)):
+            robots += robot_stack(
+                ns, spawn, write_robot_configs(ns, config_dir),
+                use_sim_time, start_offset=i * ROBOT_START_STAGGER,
+            )
         return [
             gzserver_cmd, clock_bridge, *robots,
             *map_merge_stack(spawns, load_world_size(WORLD_META_FILE), use_sim_time),
@@ -448,18 +461,29 @@ def generate_launch_description():
             f"exploration_mode must be 'classic', 'rl' or 'none' (got {mode!r})"
         )
 
-    # The RL agent needs PyTorch which lives in the project-local .venv.
-    # We inject the venv's site-packages into PYTHONPATH so the system Python
-    # (used by ros2 launch) can import torch without a global install.
-    # colcon sets COLCON_PREFIX_PATH to <workspace>/install; go one level up.
-    _ws_root = os.path.dirname(os.environ.get('COLCON_PREFIX_PATH', ''))
+    # The RL agent needs PyTorch from the project-local .venv; inject its
+    # site-packages into PYTHONPATH. Resolve the workspace root from
+    # COLCON_PREFIX_PATH when the shell was sourced, else from this installed
+    # launch file's location (<ws>/install/tb3_slam/share/tb3_slam/launch/).
     _py_ver = f'python{sys.version_info.major}.{sys.version_info.minor}'
+    _prefix = os.environ.get('COLCON_PREFIX_PATH', '').split(os.pathsep)[0]
+    if _prefix:
+        _ws_root = os.path.dirname(_prefix)
+    else:
+        _ws_root = str(Path(__file__).resolve().parents[5])
     _venv_site = os.path.join(_ws_root, '.venv', 'lib', _py_ver, 'site-packages')
+    if not os.path.isdir(_venv_site):
+        print(
+            f'[sim_slam.launch] WARNING: venv site-packages not found at '
+            f'{_venv_site} — the RL explorer will fail to import torch '
+            f'(see AGENTS.md).',
+            file=sys.stderr,
+        )
 
     inject_venv = AppendEnvironmentVariable('PYTHONPATH', _venv_site)
 
     exploration_delayed = TimerAction(
-        period=20.0,
+        period=EXPLORER_START_DELAY,
         actions=[OpaqueFunction(function=launch_explorers)],
     )
 

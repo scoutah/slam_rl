@@ -285,6 +285,8 @@ def centroids_from_map_debug(
       - group_sizes (list of ints), dropped_group_sample (up to 3 dropped groups
         with centroid coords + cell value + 3 frontier cells with cardinal
         neighbour values — for understanding why find_centroid returned None)
+      - centroid_frontiers (frontier-cell sets aligned with the approach goals;
+        groups sharing one approach point are combined)
     """
     grid = np.array(msg.data, dtype=np.int8).reshape(msg.info.height, msg.info.width)
     free_seeds = {robot_grid_pos} if robot_grid_pos is not None else None
@@ -309,6 +311,7 @@ def centroids_from_map_debug(
 
     centroids: list[tuple[int, int]] = []
     centroid_group_sizes: list[int] = []
+    centroid_frontiers: list[set[tuple[int, int]]] = []
     dropped_samples: list[dict] = []
     for group in groups:
         centroid = find_centroid(
@@ -317,9 +320,11 @@ def centroids_from_map_debug(
         if centroid is not None:
             if centroid in centroids:
                 centroid_group_sizes[centroids.index(centroid)] += len(group)
+                centroid_frontiers[centroids.index(centroid)].update(group)
             else:
                 centroids.append(centroid)
                 centroid_group_sizes.append(len(group))
+                centroid_frontiers.append(set(group))
         elif len(dropped_samples) < 3:
             n = len(group)
             cr = sum(r for r, _ in group) // n
@@ -357,6 +362,7 @@ def centroids_from_map_debug(
         'n_dropped_groups': len(groups) - len(centroids),
         'group_sizes': [len(g) for g in groups],
         'centroid_group_sizes': centroid_group_sizes,
+        'centroid_frontiers': centroid_frontiers,
         'dropped_group_sample': dropped_samples,
         'frontiers': frontiers,
     }

@@ -85,7 +85,9 @@ origin plus the robot's spawn pose onto one fixed-extent grid (world +1 m, 0.05 
 origin never moves) and fused by per-cell priority. Static `map → <ns>/map` transforms carry the
 spawn offset. Offsets are fixed, so inter-robot Cartographer drift is not corrected (acceptable for
 short 8/12 m episodes — state it in the paper). The detailed rationale (why not `multirobot_map_merge`,
-why the gentle startup spin) lives in `map_merging.py` and `sim_slam.launch.py`.
+why the gentle startup spin) lives in `map_merging.py` and `sim_slam.launch.py`. Teammates see each
+other as walls, so `map_merger` frees each robot's current 0.22 m footprint disc
+(`clear_robot_footprints`, poses from `/<ns>/tf` like the explorer — not via `tf_relay`).
 
 **Frontier pipeline** (`frontier_utils.py`, both explorers): cell classes `0–25` free / `26–74`
 uncertain / `75–100` wall / `-1` unknown. A **frontier = FREE cell with an UNCERTAIN cardinal
@@ -103,7 +105,9 @@ goals (cancel after `goal_timeout` 45 s, or `no_progress_timeout` 8 s without `p
 On every merged-`/map` update it also publishes the union of per-robot frontiers/centroids (plus each
 active goal) as a `MarkerArray` on `/frontiers_viz` for RViz (`frontier_viz.py`), independent of goal
 state and of the chosen method.
-Helpers for subclasses: `candidates_for(robot)` and `path_cost(robot, x, y)`. `ClassicExplorer`
+Helpers for subclasses: `candidates_for(robot)` (each `FrontierCandidate` also carries its
+group's `frontier_cells`) and `path_cost(robot, x, y)`. When `episode_manager`'s episode file
+appears (stuck/timeout too), the base stops re-tasking and cancels active goals. `ClassicExplorer`
 still inherits the empty `select_goals` (cost-utility strategy layered on later); `RLExplorer`
 (`tb3_reinforced_exploration/multi_robot_explorer.py`) overrides `select_goals` with a centralised
 CTDE DQN allocator — one shared Q-net scores each robot's frontiers (`rl_core.py::TeamLearner`,

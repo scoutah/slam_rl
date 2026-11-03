@@ -85,12 +85,17 @@ class RobotState:
 
 @dataclass
 class FrontierCandidate:
-    """A navigable frontier centroid on the merged map."""
+    """An approach goal and its underlying frontier cells on the merged map.
+
+    The group cells retain frontier identity when robots need different
+    approach points for the same group.
+    """
 
     cell: tuple[int, int]
     x: float
     y: float
     group_size: int
+    frontier_cells: frozenset[tuple[int, int]] = frozenset()
 
 
 def candidates_for_robot(
@@ -105,7 +110,10 @@ def candidates_for_robot(
     for i, cell in enumerate(centroids):
         wx, wy = grid_to_world(cell, merged_map)
         group_size = sizes[i] if i < len(sizes) else 0
-        candidates.append(FrontierCandidate(cell=cell, x=wx, y=wy, group_size=group_size))
+        candidates.append(FrontierCandidate(
+            cell=cell, x=wx, y=wy, group_size=group_size,
+            frontier_cells=frozenset(stats['centroid_frontiers'][i]),
+        ))
     return candidates
 
 

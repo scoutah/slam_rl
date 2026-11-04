@@ -98,7 +98,7 @@ nearest footprint-safe, cardinal-connected FREE cell to the centroid, ≥ `MIN_G
 **0.4999** offset on purpose (Nav2 rounding) — don't "fix" to 0.5.
 
 **Explorer base + methods**: common ROS I/O lives in `tb3_slam/multi_robot_explorer.py::MultiRobotExplorerNode`;
-a method is a subclass overriding one method, `select_goals(merged_map, [RobotState]) -> {ns: Goal|None}`
+a method can override `select_goals(merged_map, [RobotState]) -> {ns: Goal|None}`
 (a `Goal` of `None` = leave the robot as is). The base subscribes to the merged `/map`, looks up each
 robot pose, calls `select_goals` every 2 s, dispatches to `/<ns>/navigate_to_pose`, and supervises
 goals (cancel after `goal_timeout` 45 s, or `no_progress_timeout` 8 s without `progress_step` 0.1 m).

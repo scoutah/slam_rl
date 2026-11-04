@@ -107,13 +107,15 @@ active goal) as a `MarkerArray` on `/frontiers_viz` for RViz (`frontier_viz.py`)
 state and of the chosen method.
 Helpers for subclasses: `candidates_for(robot)` (each `FrontierCandidate` also carries its
 group's `frontier_cells`) and `path_cost(robot, x, y)`. When `episode_manager`'s episode file
-appears (stuck/timeout too), the base stops re-tasking and cancels active goals.
-`ClassicExplorer` owns its asynchronous decision rounds: serial confirmed Nav2 plans per robot
-(requested in the robot's `<ns>/map` frame, like goals), then greedy cost-utility assignment with
-marginal visible area, frontier-group reservations, latest-map reachability checks and failed-goal
-memory (goals cut short by the episode end are not failures). It keeps valid active goals stable.
-See `tb3_exploration/cost_utility.py` for the formula and fixed, size-independent parameters.
-`RLExplorer` on this branch still has empty selection; its implementation is tracked in #13.
+appears (stuck/timeout too), the base stops re-tasking and cancels active goals. `ClassicExplorer`
+still inherits the empty `select_goals` (cost-utility strategy layered on later); `RLExplorer`
+(`tb3_reinforced_exploration/multi_robot_explorer.py`) overrides `select_goals` with a centralised
+CTDE DQN allocator — one shared Q-net scores each robot's frontiers (`rl_core.py::TeamLearner`,
+ε-greedy, shared replay), goals are assigned greedily so the two robots never double-book a
+frontier, and the shared team-coverage reward trains the net online. It loads a checkpoint from
+`data_dir`/`$SLAM_RL_DATA_DIR` if present (fresh net otherwise) and runs untrained, so
+`exploration_mode:=rl` is testable without prior training — it just acts near-randomly at high ε
+and saves/trains on disk unless pointed at a throwaway `$SLAM_RL_DATA_DIR`.
 
 **Coverage / episode end** (`episode_manager.py` on the merged `/map`): coverage = known-free cells
 (0–25) / expected free cells, capped at 1.0. Episode ends on coverage ≥ threshold, <0.5 % gained in

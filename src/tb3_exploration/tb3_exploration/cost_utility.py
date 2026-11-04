@@ -1,9 +1,6 @@
-"""Occlusion-aware information estimates and greedy cost-utility assignment."""
+"""Greedy cost-utility assignment over information bids (gain: tb3_slam.information_gain)."""
 from dataclasses import dataclass
 import math
-
-import numpy as np
-from tb3_slam.frontier_utils import FRONTIER_MAX, FRONTIER_MIN, UNKNOWN, WALL_MIN
 
 
 @dataclass(frozen=True)
@@ -15,42 +12,6 @@ class Bid:
     path_length: float
     information: frozenset[tuple[int, int]]
     frontier: frozenset[tuple[int, int]]
-
-
-def visible_information(
-    grid: np.ndarray, cell: tuple[int, int], resolution: float, radius: float,
-) -> frozenset[tuple[int, int]]:
-    """Estimate unseen cells within a sensor disc, stopping rays at known walls.
-
-    Unknown and uncertain cells carry information; known-free cells do not.
-    Half-cell ray steps and one ray per perimeter cell approximate visibility.
-    Unobserved obstacles cannot occlude rays: this is an optimistic area proxy.
-    """
-    if resolution <= 0 or radius <= 0:
-        raise ValueError('resolution and sensor radius must be positive')
-    row, col = cell
-    height, width = grid.shape
-    if not (0 <= row < height and 0 <= col < width):
-        return frozenset()
-    extent = radius / resolution
-    angles = np.linspace(0, 2 * math.pi, max(8, math.ceil(2 * math.pi * extent)),
-                         endpoint=False)
-    dr, dc = np.sin(angles), np.cos(angles)
-    active = np.ones(len(angles), dtype=bool)
-    visible = np.zeros(grid.shape, dtype=bool)
-    for distance in np.arange(0, extent + 0.25, 0.5):
-        rr = np.rint(row + dr * distance).astype(int)
-        cc = np.rint(col + dc * distance).astype(int)
-        active &= (rr >= 0) & (rr < height) & (cc >= 0) & (cc < width)
-        indices = np.flatnonzero(active)
-        if not len(indices):
-            break
-        values = grid[rr[indices], cc[indices]]
-        active[indices[values >= WALL_MIN]] = False
-        unseen = (values == UNKNOWN) | ((values >= FRONTIER_MIN) & (values <= FRONTIER_MAX))
-        hits = indices[unseen]
-        visible[rr[hits], cc[hits]] = True
-    return frozenset(map(tuple, np.argwhere(visible).tolist()))
 
 
 def greedy_assignment(

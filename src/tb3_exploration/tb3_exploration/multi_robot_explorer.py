@@ -6,7 +6,7 @@ from action_msgs.msg import GoalStatus
 from nav2_msgs.action import ComputePathToPose
 import numpy as np
 import rclpy
-from tb3_exploration.cost_utility import Bid, greedy_assignment, visible_information
+from tb3_exploration.cost_utility import Bid, greedy_assignment
 from tb3_slam.frontier_utils import (
     GOAL_CLEARANCE_M,
     grid_to_world,
@@ -14,6 +14,7 @@ from tb3_slam.frontier_utils import (
     reachable_goal_cells,
     world_to_grid,
 )
+from tb3_slam.information_gain import visible_information
 from tb3_slam.multi_robot_explorer import (
     candidates_for_robot,
     Goal,

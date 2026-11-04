@@ -111,9 +111,9 @@ betreffenden Stelle im Code, nicht hier und nicht in langen Datei-Headern.
 | Datei | Inhalt |
 |---|---|
 | `tb3_exploration/multi_robot_explorer.py` | `ClassicExplorer`: asynchrone, pro Roboter serielle Nav2-Pfadprüfung, aktuelle Kartenvalidierung, Greedy-Teamzuweisung, Reservierungen und Wiederanlauf nach Fehlzielen. |
-| `tb3_exploration/cost_utility.py` | NumPy/stdlib-Entscheidungskern: sichtbare Informationszellen und Greedy-Zuweisung mit marginalem Informationsgewinn und normierten Pfadkosten. |
+| `tb3_exploration/cost_utility.py` | Stdlib-Entscheidungskern: Greedy-Zuweisung mit marginalem Informationsgewinn und normierten Pfadkosten (die Informationszellen kommen aus `tb3_slam/information_gain.py`). |
 | `tb3_exploration/frontier_explorer.py` | Alter Single-Robot-Frontier-Node (nicht mehr gelauncht). Referenz für Ziel-Überwachung/Ranking. |
-| `test/test_cost_utility.py` | Deterministische Prüfungen von Sichtbarkeit, Nutzen, Kosten, Teamkopplung und exklusiver Zuweisung. |
+| `test/test_cost_utility.py` | Deterministische Prüfungen von Nutzen, Kosten, Teamkopplung und exklusiver Zuweisung. |
 | `test/test_classic_explorer.py` | ROS-/Nav2-Grenztests für Pfadbestätigung, Timeouts, verspätete Antworten, Kartenänderungen und Zielüberwachung. |
 
 ### `src/tb3_reinforced_exploration` — RL-Methode

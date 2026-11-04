@@ -67,6 +67,16 @@ colcon test --packages-select tb3_slam && colcon test-result --verbose
 `colcon test` liefert Exit 0 auch bei Fehlern – immer `colcon test-result`
 lesen.
 
+## Klassische Exploration
+
+`classic_explorer` verteilt bestätigte Nav2-Pfade mit einer Greedy-Cost-Utility-
+Zuweisung. Der Nutzen schätzt die sichtbare unbekannte/unsichere Fläche innerhalb
+von 3,5 m; bekannte Wände verdecken dahinterliegende Zellen. Bereits vergebene
+Frontiers und überlappende Sichtbereiche werden bei weiteren Zuweisungen
+berücksichtigt. Laufende Fahrten bleiben stabil, freie Roboter erhalten neue Ziele.
+Die Methode verwendet auf 8×8 und 12×12 dieselben Parameter und lernt nichts.
+Formel und Greedy-Entscheidung sind in `tb3_exploration/cost_utility.py` dokumentiert.
+
 ## Code map
 
 Index mit einer Zeile pro Datei. **Vor jeder Code-Änderung lesen, nach jeder
@@ -93,13 +103,18 @@ betreffenden Stelle im Code, nicht hier und nicht in langen Datei-Headern.
 | `tb3_slam/cmd_vel_relay.py` | Nav2 `/<ns>/cmd_vel_smoothed` (Twist) → `/<ns>/cmd_vel` (TwistStamped, für die Jazzy-gz-Bridge). |
 | `tb3_slam/tf_relay.py` | Reine Visualisierungshilfe: spiegelt `/<ns>/tf` auf globales `/tf`, damit RViz das RobotModel zeigt. Nur mit RViz gestartet; der Explorer hängt nicht mehr davon ab. |
 | `tb3_slam/nav2_gate.py` | Kurzlebiger Prozess (`nav2_gate --ns <ns>`): blockiert auf `/<ns>/navigate_to_pose`, Exit 0 sobald Nav2 aktiv / Exit 1 bei Timeout. Launch startet beide Gates parallel; der Explorer startet, sobald das letzte Gate beendet ist (`OnProcessExit`-Countdown) — signalbasiert statt per festem Delay. |
+| `test/test_explorer_launch.py` | Prüft die eigenständige Methodenwahl und die TF-Verdrahtung: `tf_relay` nur mit RViz, `map→<ns>/map` auf globalem `/tf_static`. |
+| `test/test_robot_footprints.py` | Prüft, dass kartierte Mitroboter den eigenen Start nicht blockieren und Wände außerhalb des Footprints erhalten bleiben. |
 
 ### `src/tb3_exploration` — klassische Methode
 
 | Datei | Inhalt |
 |---|---|
-| `tb3_exploration/multi_robot_explorer.py` | `ClassicExplorer` (Node `classic_explorer`): Cost-Utility-Allokator. Baseline erbt aktuell das leere `select_goals`. |
+| `tb3_exploration/multi_robot_explorer.py` | `ClassicExplorer`: asynchrone, pro Roboter serielle Nav2-Pfadprüfung, aktuelle Kartenvalidierung, Greedy-Teamzuweisung, Reservierungen und Wiederanlauf nach Fehlzielen. |
+| `tb3_exploration/cost_utility.py` | Stdlib-Entscheidungskern: Greedy-Zuweisung mit marginalem Informationsgewinn und normierten Pfadkosten (die Informationszellen kommen aus `tb3_slam/information_gain.py`). |
 | `tb3_exploration/frontier_explorer.py` | Alter Single-Robot-Frontier-Node (nicht mehr gelauncht). Referenz für Ziel-Überwachung/Ranking. |
+| `test/test_cost_utility.py` | Deterministische Prüfungen von Nutzen, Kosten, Teamkopplung und exklusiver Zuweisung. |
+| `test/test_classic_explorer.py` | ROS-/Nav2-Grenztests für Pfadbestätigung, Timeouts, verspätete Antworten, Kartenänderungen und Zielüberwachung. |
 
 ### `src/tb3_reinforced_exploration` — RL-Methode
 

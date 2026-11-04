@@ -1,9 +1,7 @@
-"""ROS-free learning core of the pointwise-DQN explorer.
+"""ROS-free learning core of the RL explorers (multi-robot QMIX + legacy DQN).
 
-Features, epsilon-greedy policy + decay, reward, replay buffer with disk
-persistence, the Q-network and persist-dir resolution — everything that does not
-need rclpy/tf2/Nav2, so it stays unit-testable (torch is imported lazily).
-``rl_agent`` imports from here.
+Everything that needs no rclpy/tf2/Nav2, so it stays unit-testable; torch is
+imported lazily via ``_require_torch``. ``rl_agent`` uses the legacy part.
 """
 from __future__ import annotations
 
@@ -15,15 +13,7 @@ import random
 
 import numpy as np
 
-FEATURE_DIM = 3             # [group_size_norm, path_length_norm, coverage]
-
-# Multi-agent (team-aware) per-frontier features for the centralised explorer.
-# [group_size_norm, path_norm, coverage, teammate_dist_norm, contested]. All
-# normalisers are either already in [0, 1] (coverage, contested) or divide a
-# distance by the *map's own diagonal*, which is read from the live grid — so
-# the same relative frontier yields the same features on 8x8 and 12x12. That
-# size-invariance is what lets the 8x8-trained policy run unchanged on 12x12.
-TEAM_FEATURE_DIM = 5
+FEATURE_DIM = 3             # legacy rl_agent: [group_size_norm, path_length_norm, coverage]
 
 REPLAY_CAPACITY = 50_000
 BATCH_SIZE = 64
@@ -32,6 +22,9 @@ LR = 1e-3
 
 EPSILON_START = 1.0
 EPSILON_END = 0.05
+# QMixLearner decays once per *episode* (end_episode), not per gradient step:
+# 0.98 ** 150 ≈ 0.05, so ε reaches its floor after ≈150 training episodes.
+# (The legacy single-robot rl_agent still decays per step.)
 EPSILON_DECAY = 0.98
 
 TARGET_UPDATE_INTERVAL = 50
@@ -40,7 +33,20 @@ MIN_REPLAY_SIZE = 50
 # Size-invariant normalisation (relative, not absolute coords) so an 8x8-trained
 # policy transfers to the unseen 12x12 world. Single source of truth.
 GROUP_SIZE_NORM = 100.0
-PATH_LENGTH_NORM = 10.0
+PATH_LENGTH_NORM = 10.0     # legacy rl_agent only (absolute metres)
+
+# Multi-robot (QMIX) dimensions. OBS_DIM: per-candidate local observation o_i,
+# see make_local_observation. STATE_DIM: global state s, training only, see
+# make_global_state.
+OBS_DIM = 5
+STATE_DIM = 4
+FRONTIER_COUNT_NORM = 20.0  # frontier-group count that maps to 1.0 in s
+MIXER_EMBED_DIM = 16
+GRAD_CLIP_NORM = 10.0       # usual QMIX setting; keeps the hypernetworks stable
+
+CONTESTED_RADIUS_NORM = 0.1   # intent within 10 % of the diagonal = taken
+
+Point = tuple[float, float]
 
 
 def make_features(group_size: float,
@@ -54,33 +60,151 @@ def make_features(group_size: float,
     ], dtype=np.float32)
 
 
-CONTESTED_RADIUS_NORM = 0.1   # teammate goal within 10 % of the diagonal = contested
+# ── Intent communication + local observation (Dec-POMDP o_i) ───────
+
+def _dist(a: Point, b: Point) -> float:
+    return ((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2) ** 0.5
 
 
-def make_team_features(group_size: float,
-                       path_length: float,
-                       coverage: float,
-                       teammate_dist: float,
-                       map_diagonal: float,
-                       contested: bool) -> np.ndarray:
-    """Size-invariant, team-aware per-frontier features for the team explorer.
+def near_any(x: float, y: float, points: list[Point], radius: float) -> bool:
+    """Return True if (x, y) lies within ``radius`` of any of ``points``."""
+    return any(_dist((x, y), p) <= radius for p in points)
 
-    ``path_length`` (this robot's cost to the frontier) and ``teammate_dist``
-    (the other robot's straight-line distance to the same frontier) are both
-    divided by ``map_diagonal`` — the diagonal of the live merged grid in metres
-    — so they stay in roughly [0, 1] regardless of world size. No absolute world
-    coordinate ever enters the vector. ``contested`` is the assignment-status
-    flag (teammate already heading for this frontier).
 
-    Returns ``[group_size_norm, path_norm, coverage, teammate_dist_norm, contested]``.
+def filter_claimed(candidates: list, claimed: list[Point],
+                   radius: float) -> list:
+    """Drop candidates (objects with ``.x``/``.y``) near a received intent.
+
+    Local rule each robot applies to the intents it has *received* (teammates'
+    ongoing or just-announced goals), not a central allocator. It is what
+    guarantees no frontier is double-booked within a decision cycle.
+    """
+    return [c for c in candidates if not near_any(c.x, c.y, claimed, radius)]
+
+
+def nearest_intent_dist(point: Point, intents: list[Point]) -> float | None:
+    """Distance from ``point`` to the closest received intent, None if none."""
+    if not intents:
+        return None
+    return min(_dist(point, p) for p in intents)
+
+
+def make_local_observation(group_size: float,
+                           path_length: float,
+                           intent_dist: float | None,
+                           map_diagonal: float,
+                           info_gain: float = 0.0) -> np.ndarray:
+    """Local observation o_i of one candidate frontier for one robot.
+
+    Dec-POMDP: built only from the robot's own perspective (its own path cost)
+    plus the teammate's communicated intent (Tan et al.) — never the teammate's
+    pose or global quantities such as team coverage. The frontier itself comes
+    from the merged map, which counts as a shared, communicated world model.
+    Every distance is divided by the live map diagonal, so the same relative
+    geometry gives the same o_i on 8x8 and 12x12 (size invariance for transfer).
+
+    ``info_gain`` is the estimated unseen area the frontier reveals as a
+    fraction of the sensor disc (``tb3_slam.information_gain``), net of what the
+    teammate's announced intent already covers — the same raw quantity the
+    classical explorer uses; the net learns its own trade-off against the path.
+
+    Returns ``[group_size_norm, path_norm, intent_dist_norm, has_intent,
+    info_gain]``; ``intent_dist_norm`` is clipped to [0, 1] and is 1.0 without
+    an intent, ``info_gain`` is clipped to [0, 1].
     """
     diag = map_diagonal if map_diagonal > 1e-6 else 1.0
+    if intent_dist is None:
+        intent_norm, has_intent = 1.0, 0.0
+    else:
+        intent_norm, has_intent = min(max(intent_dist / diag, 0.0), 1.0), 1.0
     return np.array([
         group_size / GROUP_SIZE_NORM,
         path_length / diag,
-        coverage,
-        teammate_dist / diag,
-        1.0 if contested else 0.0,
+        intent_norm,
+        has_intent,
+        min(max(info_gain, 0.0), 1.0),
+    ], dtype=np.float32)
+
+
+def decentralised_round(order: list[str],
+                        busy_intents: dict[str, Point],
+                        candidates: dict[str, list],
+                        observe,
+                        act,
+                        radius: float) -> tuple[dict, dict, dict]:
+    """One decision cycle of decentralised execution with intent messages.
+
+    ``order`` is the fixed communication order of the *idle* robots;
+    ``busy_intents`` the ongoing goals announced at cycle start. Each idle
+    robot receives the teammates' intents so far, drops candidates (objects
+    with ``.x``/``.y``) within ``radius`` of them, builds its observation
+    matrix via ``observe(name, cand, received) -> o_i row``, picks
+    ``act(obs) -> index`` and announces the choice as its intent.
+
+    Returns ``(choices, options, intents)``: chosen candidate per robot that
+    picked one, its observation matrix + chosen index ``(obs, idx)``, and all
+    intents at the end of the cycle.
+    """
+    intents = dict(busy_intents)
+    choices: dict = {}
+    options: dict = {}
+    for name in order:
+        received = [p for n, p in intents.items() if n != name]
+        cands = filter_claimed(candidates.get(name, []), received, radius)
+        if not cands:
+            continue
+        obs = np.stack([observe(name, c, received) for c in cands])
+        idx = act(obs)
+        choices[name] = cands[idx]
+        options[name] = (obs, idx)
+        intents[name] = (cands[idx].x, cands[idx].y)
+    return choices, options, intents
+
+
+def assemble_joint(agents: list[str],
+                   actions: dict[str, np.ndarray],
+                   options: dict[str, np.ndarray],
+                   obs_dim: int = OBS_DIM
+                   ) -> tuple[np.ndarray, np.ndarray, list[np.ndarray]]:
+    """Stack per-robot action rows/option sets in fixed agent order.
+
+    Returns ``(actions [n, obs_dim], mask [n], candidates)``; a robot without an
+    action (absent, or idle with nothing to pick) gets zeros, mask 0 and an
+    empty ``[0, obs_dim]`` candidate set.
+    """
+    n = len(agents)
+    act = np.zeros((n, obs_dim), np.float32)
+    mask = np.zeros(n, np.float32)
+    cands = [np.zeros((0, obs_dim), np.float32) for _ in range(n)]
+    for i, ns in enumerate(agents):
+        if ns in actions:
+            act[i], mask[i] = actions[ns], 1.0
+            cands[i] = np.asarray(options[ns], np.float32).reshape(-1, obs_dim)
+    return act, mask, cands
+
+
+def make_global_state(coverage: float,
+                      robot_positions: list[Point],
+                      n_frontier_groups: int,
+                      n_busy: int,
+                      n_agents: int,
+                      map_diagonal: float) -> np.ndarray:
+    """Global state s for centralised training only (CTDE); never used to act.
+
+    Conditions the QMIX mixer. Size-invariant:
+    ``[coverage, inter_robot_dist/diag, min(groups/FRONTIER_COUNT_NORM, 1),
+    busy_fraction]``. With fewer than two known robots the distance is 0 (the
+    agent mask already marks the missing robot).
+    """
+    diag = map_diagonal if map_diagonal > 1e-6 else 1.0
+    pairs = [_dist(a, b) for i, a in enumerate(robot_positions)
+             for b in robot_positions[i + 1:]]
+    inter = min(sum(pairs) / len(pairs) / diag, 1.0) if pairs else 0.0
+    return np.array([
+        min(max(coverage, 0.0), 1.0),
+        inter,
+        min(n_frontier_groups / FRONTIER_COUNT_NORM, 1.0),
+        n_busy / n_agents if n_agents > 0 else 0.0,
     ], dtype=np.float32)
 
 
@@ -102,25 +226,37 @@ Transition = collections.namedtuple(
     ['state', 'action_features', 'reward', 'next_candidates', 'done'],
 )
 
+# One joint decision event of the team (QMIX replay entry). actions:
+# [n_agents, OBS_DIM] observation features of each agent's chosen/ongoing goal;
+# mask: [n_agents] 1 = agent acted/held a goal; next_candidates: per agent an
+# array [k, OBS_DIM] (k may be 0) of what it could pick at the next event.
+JointTransition = collections.namedtuple(
+    'JointTransition',
+    ['actions', 'mask', 'state', 'reward', 'next_candidates', 'next_state',
+     'next_mask', 'done'],
+)
+
 
 class ReplayBuffer:
     """Fixed-capacity replay buffer with disk persistence."""
 
     def __init__(self, capacity: int = REPLAY_CAPACITY) -> None:
-        self._buf: collections.deque[Transition] = (
-            collections.deque(maxlen=capacity)
-        )
+        self._buf: collections.deque = collections.deque(maxlen=capacity)
 
-    def push(self, t: Transition) -> None:
+    def push(self, t: Transition | JointTransition) -> None:
         """Add a transition (oldest evicted once capacity is reached)."""
         self._buf.append(t)
 
-    def sample(self, batch_size: int) -> list[Transition]:
+    def sample(self, batch_size: int) -> list:
         """Sample a random mini-batch without replacement."""
         return random.sample(self._buf, batch_size)
 
     def __len__(self) -> int:
         return len(self._buf)
+
+    def clear(self) -> None:
+        """Drop all stored transitions."""
+        self._buf.clear()
 
     def save(self, path: Path) -> None:
         """Persist the buffer to disk, creating parent dirs as needed."""
@@ -135,6 +271,75 @@ class ReplayBuffer:
         with open(path, 'rb') as f:
             data = pickle.load(f)
         self._buf = collections.deque(data, maxlen=self._buf.maxlen)
+
+
+class JointEpisodeRecorder:
+    """Turn the team's joint decision events into QMIX ``JointTransition`` s.
+
+    A joint event is a decision cycle in which at least one robot received a
+    new goal (semi-MDP step: the hierarchical action is a frontier and Nav2
+    executes it, so steps have variable length). Each event stays pending until
+    the next one (or episode end) closes it with the *shared* team reward
+    ``compute_reward(prev_cov, next_cov, real elapsed seconds)``.
+    """
+
+    def __init__(self) -> None:
+        # (actions, mask, state, coverage, time) of the open event, or None.
+        self._pending: tuple | None = None
+
+    @property
+    def has_pending(self) -> bool:
+        """Return True while an event awaits its reward."""
+        return self._pending is not None
+
+    def record_event(self,
+                     actions: np.ndarray,
+                     mask: np.ndarray,
+                     candidates: list[np.ndarray],
+                     state: np.ndarray,
+                     coverage: float,
+                     now: float) -> JointTransition | None:
+        """Close the pending event with this one as successor; open this one.
+
+        ``candidates[i]`` is what agent i could choose from at this event
+        (idle: its candidate set; busy: its ongoing goal only; absent: empty).
+        Returns the closed transition, or None for the episode's first event.
+        """
+        next_mask = np.array(
+            [1.0 if m > 0 and len(c) > 0 else 0.0
+             for m, c in zip(mask, candidates)], dtype=np.float32)
+        out = self._close(coverage, now, list(candidates), state, next_mask,
+                          done=False)
+        self._pending = (np.asarray(actions, np.float32),
+                         np.asarray(mask, np.float32),
+                         np.asarray(state, np.float32), coverage, now)
+        return out
+
+    def close(self, coverage: float, now: float) -> JointTransition | None:
+        """Close the pending event at episode end (done, nothing to bootstrap)."""
+        if self._pending is None:
+            return None
+        n, obs_dim = self._pending[0].shape
+        empty = [np.zeros((0, obs_dim), np.float32) for _ in range(n)]
+        # next_state is never used when done; keep a valid shape anyway.
+        out = self._close(coverage, now, empty,
+                          np.zeros_like(self._pending[2]),
+                          np.zeros(n, np.float32), done=True)
+        self._pending = None
+        return out
+
+    def _close(self, coverage, now, next_candidates, next_state, next_mask,
+               done) -> JointTransition | None:
+        if self._pending is None:
+            return None
+        actions, mask, state, prev_cov, prev_t = self._pending
+        reward = compute_reward(prev_cov, coverage, now - prev_t)
+        return JointTransition(
+            actions, mask, state, reward,
+            [np.asarray(c, np.float32).reshape(-1, actions.shape[1])
+             for c in next_candidates],
+            np.asarray(next_state, np.float32), next_mask, bool(done),
+        )
 
 
 def resolve_persist_dir(environ: dict | None = None,
@@ -196,6 +401,52 @@ def make_q_network(feature_dim: int = FEATURE_DIM):
     return QNetwork()
 
 
+def make_mixer(n_agents: int,
+               state_dim: int = STATE_DIM,
+               embed_dim: int = MIXER_EMBED_DIM):
+    """Build the QMIX mixing network as an nn.Module.
+
+    ``forward(agent_qs [B, n], states [B, S], mask [B, n] | None) -> [B]``.
+    Hypernetworks map the global state s to the mixing weights; ``abs()`` makes
+    them non-negative and ELU is monotonic, so ∂Q_tot/∂Q_i ≥ 0 (QMIX's
+    monotonicity, which makes per-agent argmax consistent with the joint
+    argmax). Biases come from s, the output bias via a small MLP. A masked
+    (absent) agent's Q_i is zeroed and therefore contributes nothing.
+    """
+    torch, nn = _require_torch()
+
+    class QMixer(nn.Module):
+        """Monotonic state-conditioned mixer Q_tot = f_s(Q_1, ..., Q_n)."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.n_agents = n_agents
+            self.embed_dim = embed_dim
+            self.hyper_w1 = nn.Linear(state_dim, n_agents * embed_dim)
+            self.hyper_b1 = nn.Linear(state_dim, embed_dim)
+            self.hyper_w2 = nn.Linear(state_dim, embed_dim)
+            self.hyper_b2 = nn.Sequential(
+                nn.Linear(state_dim, embed_dim), nn.ReLU(),
+                nn.Linear(embed_dim, 1),
+            )
+
+        def forward(self, agent_qs, states, mask=None):
+            """Mix per-agent Q-values into Q_tot (one value per batch row)."""
+            b = agent_qs.shape[0]
+            if mask is not None:
+                agent_qs = agent_qs * mask
+            w1 = torch.abs(self.hyper_w1(states)).view(
+                b, self.n_agents, self.embed_dim)
+            b1 = self.hyper_b1(states).view(b, 1, self.embed_dim)
+            hidden = nn.functional.elu(
+                torch.bmm(agent_qs.view(b, 1, self.n_agents), w1) + b1)
+            w2 = torch.abs(self.hyper_w2(states)).view(b, self.embed_dim, 1)
+            b2 = self.hyper_b2(states).view(b, 1, 1)
+            return (torch.bmm(hidden, w2) + b2).view(b)
+
+    return QMixer()
+
+
 def select_action(candidates: np.ndarray,
                   epsilon: float,
                   q_net=None,
@@ -220,144 +471,221 @@ def select_action(candidates: np.ndarray,
         return int(q_vals.argmax().item())
 
 
-class TeamLearner:
-    """CTDE learner for the centralised multi-robot explorer.
+class QMixLearner:
+    """CTDE learner: shared agent Q-net for execution, QMIX mixer for training.
 
-    Centralised training, decentralised execution: a *single* Q-network scores
-    frontiers for either robot (parameter sharing — the burgers are homogeneous
-    and interchangeable, so one shared set of weights halves the parameters and
-    lets both robots' experience train the same policy), and *one* shared replay
-    buffer pools transitions from both agents. Because the per-robot features are
-    team-aware (teammate distance + contested flag), the shared net still learns
-    to coordinate rather than collide, while execution stays decentralised: at
-    decision time each robot is scored independently on its own candidate set.
+    * Parameter sharing: one pointwise agent net Q(o_i, a) for all homogeneous
+      robots; the action a is a frontier, scored through its local observation
+      features (hierarchical: the net picks the target, Nav2 drives there).
+    * Decentralised execution: :meth:`act` sees only one robot's local
+      observation matrix and uses only the agent net.
+    * Centralised training: :meth:`train_step` mixes the agents' Q_i with the
+      monotonic mixer conditioned on the global state s and regresses Q_tot on
+      the shared team reward (QMIX value factorisation, i.e. credit assignment
+      of the team reward to each robot's own Q_i).
 
-    ROS-free so it is unit-testable; torch is imported lazily. The ROS node owns
-    pose/map/Nav2 I/O and feeds (features, reward, next_candidates) in here.
+    ROS-free; the node feeds ``JointTransition`` s (see JointEpisodeRecorder).
     """
 
     def __init__(self,
-                 feature_dim: int = TEAM_FEATURE_DIM,
+                 n_agents: int = 2,
+                 obs_dim: int = OBS_DIM,
+                 state_dim: int = STATE_DIM,
                  persist_dir: Path | None = None,
                  device=None) -> None:
         torch, _ = _require_torch()
         import torch.optim as optim
 
-        self.feature_dim = feature_dim
+        self.n_agents = n_agents
+        self.obs_dim = obs_dim
+        self.state_dim = state_dim
         self.persist_dir = (persist_dir if persist_dir is not None
                             else resolve_persist_dir())
         self.device = (device if device is not None
                        else torch.device('cuda' if torch.cuda.is_available()
                                          else 'cpu'))
 
-        self.q_net = make_q_network(feature_dim).to(self.device)
-        self.target_net = make_q_network(feature_dim).to(self.device)
-        self.target_net.load_state_dict(self.q_net.state_dict())
-        self.target_net.eval()
-        self.optimizer = optim.Adam(self.q_net.parameters(), lr=LR)
+        self.agent_net = make_q_network(obs_dim).to(self.device)
+        self.mixer = make_mixer(n_agents, state_dim).to(self.device)
+        self.target_agent_net = make_q_network(obs_dim).to(self.device)
+        self.target_mixer = make_mixer(n_agents, state_dim).to(self.device)
+        self._sync_targets()
+        self.target_agent_net.eval()
+        self.target_mixer.eval()
+        self.optimizer = optim.Adam(
+            list(self.agent_net.parameters()) + list(self.mixer.parameters()),
+            lr=LR,
+        )
 
         self.replay = ReplayBuffer()
         self.epsilon = EPSILON_START
         self.step_count = 0
 
-    # -- paths ---------------------------------------------------------
+    def _sync_targets(self) -> None:
+        self.target_agent_net.load_state_dict(self.agent_net.state_dict())
+        self.target_mixer.load_state_dict(self.mixer.state_dict())
+
+    # -- paths (new names, so old 5-feature TeamLearner files are ignored) --
 
     @property
-    def model_path(self) -> Path:
-        return self.persist_dir / 'model.pt'
+    def agent_path(self) -> Path:
+        return self.persist_dir / 'agent.pt'
+
+    @property
+    def mixer_path(self) -> Path:
+        return self.persist_dir / 'mixer.pt'
 
     @property
     def replay_path(self) -> Path:
-        return self.persist_dir / 'replay.pkl'
+        return self.persist_dir / 'joint_replay.pkl'
 
     @property
     def meta_path(self) -> Path:
-        return self.persist_dir / 'meta.pkl'
+        return self.persist_dir / 'qmix_meta.pkl'
 
     # -- persistence ---------------------------------------------------
 
     def load(self) -> None:
-        """Restore network, replay buffer and meta from the persist dir.
+        """Restore agent net, mixer, replay and meta from the persist dir.
 
-        A feature-dim mismatch (e.g. an old 3-feature model) is skipped rather
-        than crashing, so switching feature sets starts fresh instead of failing.
+        Agent net and mixer are loaded all-or-nothing: an incompatible or
+        unreadable checkpoint (e.g. other dims) keeps both fresh instead of
+        crashing. Replay entries with a different shape are discarded too.
         """
         torch, _ = _require_torch()
-        if self.model_path.exists():
+        if self.agent_path.exists() and self.mixer_path.exists():
+            # Clone: load_state_dict copies matching tensors in place before
+            # raising on a mismatch, so a plain reference would be corrupted.
+            fresh = tuple({k: v.clone() for k, v in net.state_dict().items()}
+                          for net in (self.agent_net, self.mixer))
             try:
-                state = torch.load(self.model_path, weights_only=True,
-                                   map_location=self.device)
-                self.q_net.load_state_dict(state)
-                self.target_net.load_state_dict(self.q_net.state_dict())
-            except (RuntimeError, KeyError):
-                pass  # incompatible checkpoint – keep the fresh network
-        self.replay.load(self.replay_path)
+                self.agent_net.load_state_dict(torch.load(
+                    self.agent_path, weights_only=True,
+                    map_location=self.device))
+                self.mixer.load_state_dict(torch.load(
+                    self.mixer_path, weights_only=True,
+                    map_location=self.device))
+            except (RuntimeError, KeyError, EOFError, pickle.UnpicklingError):
+                self.agent_net.load_state_dict(fresh[0])
+                self.mixer.load_state_dict(fresh[1])
+            self._sync_targets()
+        try:
+            self.replay.load(self.replay_path)
+        except (EOFError, pickle.UnpicklingError, AttributeError):
+            self.replay.clear()
+        if len(self.replay) and not self._replay_compatible():
+            self.replay.clear()
         if self.meta_path.exists():
             with open(self.meta_path, 'rb') as f:
                 meta = pickle.load(f)
             self.epsilon = meta.get('epsilon', EPSILON_START)
             self.step_count = meta.get('step_count', 0)
 
+    def _replay_compatible(self) -> bool:
+        t = self.replay.sample(1)[0]
+        return (isinstance(t, JointTransition)
+                and np.shape(t.actions) == (self.n_agents, self.obs_dim)
+                and np.shape(t.state) == (self.state_dim,))
+
     def save(self) -> None:
-        """Persist network, replay buffer and meta to the persist dir."""
+        """Persist agent net, mixer, replay and meta to the persist dir."""
         torch, _ = _require_torch()
         self.persist_dir.mkdir(parents=True, exist_ok=True)
-        torch.save(self.q_net.state_dict(), self.model_path)
+        torch.save(self.agent_net.state_dict(), self.agent_path)
+        torch.save(self.mixer.state_dict(), self.mixer_path)
         self.replay.save(self.replay_path)
         with open(self.meta_path, 'wb') as f:
             pickle.dump({'epsilon': self.epsilon,
                          'step_count': self.step_count}, f)
 
-    # -- acting --------------------------------------------------------
+    # -- decentralised execution ---------------------------------------
 
-    def select_index(self, candidates: np.ndarray,
-                     rng: random.Random | None = None) -> int:
-        """Epsilon-greedy frontier index for one robot's candidate features."""
-        return select_action(candidates, self.epsilon, self.q_net,
+    def act(self, obs_feats: np.ndarray,
+            rng: random.Random | None = None) -> int:
+        """Epsilon-greedy candidate index from ONE robot's local observation.
+
+        Uses only the shared agent net — never the mixer or the global state —
+        so execution is decentralised by construction.
+        """
+        return select_action(obs_feats, self.epsilon, self.agent_net,
                              self.device, rng)
 
-    # -- learning ------------------------------------------------------
+    # -- centralised training ------------------------------------------
 
-    def push(self, t: Transition) -> None:
-        """Add one agent's transition to the shared replay buffer."""
+    def push(self, t: JointTransition) -> None:
+        """Add one joint transition to the replay buffer."""
         self.replay.push(t)
 
-    def train_step(self) -> float | None:
-        """One gradient step on a shared mini-batch; returns loss or None.
+    def _next_agent_qs(self, batch: list[JointTransition]):
+        """[B, n] of max_a' Q_i_target(o'_i, a'); 0 where no candidate exists."""
+        torch, _ = _require_torch()
+        sizes = [len(c) for t in batch for c in t.next_candidates]
+        out = torch.zeros(len(batch) * self.n_agents, device=self.device)
+        if sum(sizes) == 0:
+            return out.view(len(batch), self.n_agents)
+        flat = np.concatenate([np.asarray(c, np.float32).reshape(-1, self.obs_dim)
+                               for t in batch for c in t.next_candidates])
+        q = self.target_agent_net(
+            torch.from_numpy(flat).to(self.device)).squeeze(-1)
+        start = 0
+        for j, k in enumerate(sizes):
+            if k:
+                out[j] = q[start:start + k].max()
+            start += k
+        return out.view(len(batch), self.n_agents)
 
-        Returns None (no update) until the buffer holds enough samples. Steps the
-        epsilon schedule and syncs the target net on the usual interval.
+    def train_step(self) -> float | None:
+        """One QMIX gradient step on a joint mini-batch; returns loss or None.
+
+        y = r + γ(1−done)·Q_tot_target(s', [max_a' Q_i_target(o'_i, a')]_i),
+        Q_tot = mixer(s, [Q_i(o_i, a_i)]_i), smooth-L1, Adam over agent net +
+        mixer. Returns None until the buffer holds enough samples; epsilon is
+        not touched here (see :meth:`end_episode`).
         """
         torch, nn = _require_torch()
         if len(self.replay) < max(MIN_REPLAY_SIZE, BATCH_SIZE):
             return None
 
         batch = self.replay.sample(BATCH_SIZE)
-        states = torch.FloatTensor(
-            np.stack([t.action_features for t in batch])).to(self.device)
-        rewards = torch.FloatTensor(
-            [t.reward for t in batch]).to(self.device)
-        dones = torch.FloatTensor(
-            [float(t.done) for t in batch]).to(self.device)
+        b = len(batch)
 
-        q_current = self.q_net(states).squeeze(-1)
+        def tensor(key):
+            return torch.from_numpy(np.stack(
+                [np.asarray(getattr(t, key), np.float32) for t in batch]
+            )).to(self.device)
+
+        actions, mask, states = tensor('actions'), tensor('mask'), tensor('state')
+        next_states, next_mask = tensor('next_state'), tensor('next_mask')
+        rewards = torch.tensor([t.reward for t in batch], dtype=torch.float32,
+                               device=self.device)
+        dones = torch.tensor([float(t.done) for t in batch],
+                             dtype=torch.float32, device=self.device)
+
+        agent_qs = self.agent_net(
+            actions.view(b * self.n_agents, self.obs_dim)).view(b, self.n_agents)
+        q_tot = self.mixer(agent_qs, states, mask)
         with torch.no_grad():
-            q_next = torch.zeros(BATCH_SIZE, device=self.device)
-            for i, t in enumerate(batch):
-                if t.done or not t.next_candidates:
-                    continue
-                nc = torch.FloatTensor(
-                    np.stack(t.next_candidates)).to(self.device)
-                q_next[i] = self.target_net(nc).squeeze(-1).max()
-            q_target = rewards + GAMMA * q_next * (1.0 - dones)
+            next_qs = self._next_agent_qs(batch)
+            q_tot_next = self.target_mixer(next_qs, next_states, next_mask)
+            target = rewards + GAMMA * (1.0 - dones) * q_tot_next
 
-        loss = nn.functional.smooth_l1_loss(q_current, q_target)
+        loss = nn.functional.smooth_l1_loss(q_tot, target)
         self.optimizer.zero_grad()
         loss.backward()
+        nn.utils.clip_grad_norm_(
+            list(self.agent_net.parameters()) + list(self.mixer.parameters()),
+            GRAD_CLIP_NORM)
         self.optimizer.step()
 
         self.step_count += 1
-        self.epsilon = decay_epsilon(self.epsilon)
         if self.step_count % TARGET_UPDATE_INTERVAL == 0:
-            self.target_net.load_state_dict(self.q_net.state_dict())
+            self._sync_targets()
         return float(loss.item())
+
+    def end_episode(self) -> None:
+        """Advance the epsilon schedule by one step; call once per episode.
+
+        Per-episode (not per-gradient-step) decay keeps exploration high for
+        ≈150 episodes instead of collapsing within the first few.
+        """
+        self.epsilon = decay_epsilon(self.epsilon)

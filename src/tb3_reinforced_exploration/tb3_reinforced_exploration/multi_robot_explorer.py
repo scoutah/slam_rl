@@ -1,31 +1,6 @@
-"""Centralised multi-robot RL explorer (node ``rl_explorer``).
+"""Multi-robot RL explorer (node ``rl_explorer``): CTDE with QMIX.
 
-Standalone learned method for the Studienbericht. Subclasses the shared base
-node and implements :meth:`select_goals` as a *centralised* frontier allocator
-over both robots, following CTDE (centralised training, decentralised
-execution): one parameter-sharing Q-network scores frontiers for either robot
-and a single shared replay buffer pools both robots' experience. The learning
-core lives in ``rl_core.TeamLearner`` (ROS-free, unit-tested); this file is the
-ROS node.
-
-Design choices (owned by issue #13):
-
-* **Features** are size-invariant and team-aware
-  (``rl_core.make_team_features``): ``[group_size_norm, path_norm, coverage,
-  teammate_dist_norm, contested]``. Every distance is divided by the live merged
-  grid's diagonal, so no absolute 8x8 coordinate enters the vector and the
-  8x8-trained policy runs unchanged on 12x12.
-* **Reward is shared** (global coverage gain per second, ``compute_reward``).
-  A shared team reward directly rewards joint coverage — the quantity the
-  research question measures — at the known cost of harder credit assignment;
-  the team-aware features (teammate distance, contested flag) plus CTDE are what
-  let the shared net still learn non-redundant, coordinated assignments.
-* **Every episode is committed** to replay, including stuck/timeout ones
-  (unlike the legacy single-robot node, which discarded aborted episodes). In
-  the team setting a shared coverage reward already values partial progress, and
-  discarding whole multi-robot episodes would throw away most experience.
-* **Persist location is configurable** via the ``data_dir`` parameter
-  (``$SLAM_RL_DATA_DIR``); no path is hard-coded.
+ROS side only; the learning core is ``rl_core.QMixLearner`` (ROS-free, tested).
 """
 from __future__ import annotations
 
@@ -35,6 +10,8 @@ from pathlib import Path
 import numpy as np
 import rclpy
 from tb3_slam.coverage_monitor import check_coverage
+from tb3_slam.frontier_utils import world_to_grid
+from tb3_slam.information_gain import InformationField
 from tb3_slam.multi_robot import ROBOT_NAMESPACES
 from tb3_slam.multi_robot_explorer import (
     FrontierCandidate,
@@ -44,48 +21,69 @@ from tb3_slam.multi_robot_explorer import (
 )
 
 from .rl_core import (
-    compute_reward,
-    make_team_features,
+    assemble_joint,
+    CONTESTED_RADIUS_NORM,
+    decentralised_round,
+    JointEpisodeRecorder,
+    JointTransition,
+    make_global_state,
+    make_local_observation,
+    nearest_intent_dist,
+    OBS_DIM,
+    Point,
+    QMixLearner,
     resolve_persist_dir,
-    TEAM_FEATURE_DIM,
-    TeamLearner,
-    Transition,
+    STATE_DIM,
 )
-
-CONTESTED_RADIUS_M = 0.6      # teammate goal this close to a frontier = contested
 
 
 class RLExplorer(MultiRobotExplorerNode):
-    """Learned centralised frontier assignment over both robots (CTDE)."""
+    """Learned frontier selection for the robot team (Dec-POMDP, CTDE, QMIX).
+
+    Mapping to the theory:
+
+    * Hierarchical action (Hu et al.): the learned layer picks a frontier
+      target, Nav2 (base node) drives there.
+    * Dec-POMDP / decentralised execution: each robot acts on its own local
+      observation o_i (``make_local_observation``) via ``QMixLearner.act``.
+    * Intent communication (Tan et al.): robots decide in a fixed order
+      (``ROBOT_NAMESPACES``) and announce their goal; busy robots' ongoing goals
+      are announced at cycle start. Received intents enter o_i and a local rule
+      drops candidates near them (no double-booking).
+    * Parameter sharing: one agent Q-net for both homogeneous robots.
+    * Centralised training: joint transitions with the global state s
+      (``make_global_state``) train the QMIX mixer + agent net on the shared
+      team reward (coverage gain per second), i.e. value-factorised credit
+      assignment.
+
+    Every episode (also stuck/timeout) is kept; persistence via ``data_dir`` /
+    ``$SLAM_RL_DATA_DIR``.
+    """
 
     def __init__(self) -> None:
         super().__init__('rl_explorer')
 
         persist_dir = (Path(self._data_dir).expanduser() if self._data_dir
                        else resolve_persist_dir())
-        self._learner = TeamLearner(
-            feature_dim=TEAM_FEATURE_DIM, persist_dir=persist_dir,
+        self._agents = list(ROBOT_NAMESPACES)
+        self._learner = QMixLearner(
+            n_agents=len(self._agents), obs_dim=OBS_DIM, state_dim=STATE_DIM,
+            persist_dir=persist_dir,
         )
         self._learner.load()
-
-        # Per-robot pending transition: features of the frontier it was last
-        # sent to, plus the team coverage at dispatch. Closed out on the next
-        # decision once the coverage gain (the reward) is known.
-        self._pending: dict[str, tuple[np.ndarray, float, float]] = {
-            ns: None for ns in ROBOT_NAMESPACES
-        }
+        self._recorder = JointEpisodeRecorder()
         self._committed = False
 
         self.create_timer(2.0, self._watch_episode_file)
 
         self.get_logger().info(
-            f'RLExplorer (CTDE) ready – e={self._learner.epsilon:.3f}, '
+            f'RLExplorer (QMIX/CTDE) ready – e={self._learner.epsilon:.3f}, '
             f'replay={len(self._learner.replay)}, '
             f'device={self._learner.device}, persist={persist_dir}'
         )
 
     # ------------------------------------------------------------------
-    # Strategy: centralised frontier allocation over both robots
+    # Decentralised execution with intent communication
     # ------------------------------------------------------------------
 
     def select_goals(
@@ -93,116 +91,110 @@ class RLExplorer(MultiRobotExplorerNode):
         merged_map,
         robots: list[RobotState],
     ) -> dict[str, Goal | None]:
-        """Assign at most one distinct frontier per robot via the shared policy.
+        """One decision cycle: each idle robot picks a frontier on its own o_i.
 
-        Robots are assigned greedily in turn; a frontier claimed by the first
-        robot is removed from the second's candidate set, so the centralised
-        allocator never double-books a frontier. Each per-robot decision also
-        records the learning transition (reward for the previous goal) and
-        trains the shared network.
+        Robots act in communication order. An idle robot only receives the
+        teammates' intents (ongoing goals of busy robots, goals announced
+        earlier this cycle), drops candidates within the contested radius of
+        them, scores the rest with the shared agent net and announces its
+        choice. Busy robots keep their goal (None). If any robot got a new goal
+        this is a joint event and is recorded for centralised training.
         """
         diag = self._map_diagonal(merged_map)
-        coverage = self._coverage(merged_map)
+        radius = CONTESTED_RADIUS_NORM * diag
+        info = InformationField(
+            np.asarray(merged_map.data, dtype=np.int8).reshape(
+                merged_map.info.height, merged_map.info.width),
+            merged_map.info.resolution)
+        order = sorted(robots, key=self._agent_index)
 
+        by_name = {r.name: r for r in order}
+        busy = {r.name for r in robots
+                if r.busy and r.current_goal is not None}
+        busy_intents: dict[str, Point] = {
+            r.name: (r.current_goal.x, r.current_goal.y)
+            for r in order if r.name in busy
+        }
+        idle = [r.name for r in order if r.name not in busy]
+        cands_cache: dict[str, list[FrontierCandidate]] = {
+            name: self.candidates_for(by_name[name]) for name in idle
+        }
+
+        choices, picked, intents = decentralised_round(
+            order=idle,
+            busy_intents=busy_intents,
+            candidates=cands_cache,
+            observe=lambda name, c, received: self._observe(
+                by_name[name], c.x, c.y, c.group_size, received, diag,
+                merged_map, info),
+            act=self._learner.act,     # local o_i only, shared agent net
+            radius=radius,
+        )
         goals: dict[str, Goal | None] = {r.name: None for r in robots}
-        claimed: list[tuple[float, float]] = []
+        for name, c in choices.items():
+            goals[name] = Goal(x=c.x, y=c.y, group_size=c.group_size)
 
-        for robot in robots:
-            # Keep a busy robot on its current goal instead of re-rolling a new
-            # (random at high epsilon) frontier every cycle; still reserve its
-            # claim so the teammate won't double-book it.
-            if robot.busy and robot.current_goal is not None:
-                claimed.append((robot.current_goal.x, robot.current_goal.y))
-                continue
-
-            # Decentralised execution: this robot is scored on its own
-            # candidate set, minus frontiers already claimed this cycle.
-            candidates = [
-                c for c in self.candidates_for(robot)
-                if not self._is_claimed(c, claimed)
-            ]
-            if not candidates:
-                self._close_transition(robot.name, coverage, next_feats=[],
-                                       done=self._done(coverage))
-                continue
-
-            teammate = self._teammate(robot, robots)
-            feats = np.stack([
-                self._features(robot, c, teammate, coverage, diag)
-                for c in candidates
-            ])
-
-            # Close out the previous goal's transition with this cycle's reward
-            # and the new candidate set as the next state, then train.
-            self._close_transition(robot.name, coverage,
-                                   next_feats=list(feats),
-                                   done=self._done(coverage))
-
-            idx = self._learner.select_index(feats)
-            chosen = candidates[idx]
-            goals[robot.name] = Goal(
-                x=chosen.x, y=chosen.y, group_size=chosen.group_size,
-            )
-            claimed.append((chosen.x, chosen.y))
-            self._pending[robot.name] = (feats[idx], coverage, diag)
-
+        if choices:
+            options = {n: obs for n, (obs, _) in picked.items()}
+            actions = {n: obs[idx] for n, (obs, idx) in picked.items()}
+            for name in busy:
+                # A busy robot cannot switch under this policy: its action is
+                # its ongoing goal, observed with the intents it now receives.
+                g = by_name[name].current_goal
+                received = [p for n, p in intents.items() if n != name]
+                feat = self._observe(by_name[name], g.x, g.y,
+                                     g.group_size or 0, received, diag,
+                                     merged_map, info)
+                options[name], actions[name] = feat[None], feat
+            self._record_event(merged_map, order, options, actions,
+                               cands_cache, busy, diag)
         return goals
 
-    # ------------------------------------------------------------------
-    # Feature construction
-    # ------------------------------------------------------------------
+    def _observe(self, robot: RobotState, x: float, y: float,
+                 group_size: float, received: list[Point],
+                 diag: float, merged_map,
+                 info: InformationField) -> np.ndarray:
+        """Local observation o_i of frontier (x, y) for ``robot``.
 
-    def _features(
-        self,
-        robot: RobotState,
-        cand: FrontierCandidate,
-        teammate: RobotState | None,
-        coverage: float,
-        diag: float,
-    ) -> np.ndarray:
-        """Size-invariant, team-aware features for one (robot, frontier) pair."""
-        cost = self.path_cost(robot, cand.x, cand.y)
+        The information gain is the classical explorer's ray-cast estimate of
+        the unseen area revealed at (x, y), minus what the received teammate
+        intents already cover (only communicated information is used).
+        """
+        cost = self.path_cost(robot, x, y)
         if cost is None:
             # Geometric fallback until Nav2 returns a cached path length.
-            cost = math.hypot(cand.x - robot.x, cand.y - robot.y)
-
-        if teammate is None:
-            teammate_dist = diag          # no teammate known -> treat as far
-            contested = False
-        else:
-            teammate_dist = math.hypot(cand.x - teammate.x, cand.y - teammate.y)
-            contested = self._is_contested(cand, teammate)
-
-        return make_team_features(
-            group_size=cand.group_size,
+            cost = math.hypot(x - robot.x, y - robot.y)
+        return make_local_observation(
+            group_size=group_size,
             path_length=cost,
-            coverage=coverage,
-            teammate_dist=teammate_dist,
+            intent_dist=nearest_intent_dist((x, y), received),
             map_diagonal=diag,
-            contested=contested,
+            info_gain=self._info_gain((x, y), received, merged_map, info),
         )
 
     @staticmethod
-    def _is_contested(cand: FrontierCandidate, teammate: RobotState) -> bool:
-        """Return True if the teammate is already heading for this frontier."""
-        goal = teammate.current_goal
-        if goal is None:
-            return False
-        return math.hypot(cand.x - goal.x, cand.y - goal.y) <= CONTESTED_RADIUS_M
+    def _info_gain(point: Point, intents: list[Point], merged_map,
+                   info: InformationField) -> float:
+        """Unseen-area fraction at ``point`` not yet covered by ``intents``."""
+        cell = world_to_grid(*point, merged_map)
+        if cell is None:
+            return 0.0
+        covered: set = set()
+        for intent in intents:
+            intent_cell = world_to_grid(*intent, merged_map)
+            if intent_cell is not None:
+                covered |= info.visible(intent_cell)
+        return info.fraction(cell, frozenset(covered))
 
-    @staticmethod
-    def _is_claimed(cand: FrontierCandidate, claimed: list[tuple[float, float]]) -> bool:
-        """Return True if another robot already took this frontier this cycle."""
-        return any(
-            math.hypot(cand.x - cx, cand.y - cy) <= CONTESTED_RADIUS_M
-            for cx, cy in claimed
-        )
+    def _agent_index(self, robot: RobotState) -> int:
+        try:
+            return self._agents.index(robot.name)
+        except ValueError:
+            return len(self._agents)
 
-    @staticmethod
-    def _teammate(robot: RobotState, robots: list[RobotState]) -> RobotState | None:
-        """Return the other robot (two-robot team), or None if alone."""
-        others = [r for r in robots if r.name != robot.name]
-        return others[0] if others else None
+    def _now(self) -> float:
+        """Return the current ROS time in seconds (sim time under use_sim_time)."""
+        return self.get_clock().now().nanoseconds * 1e-9
 
     @staticmethod
     def _map_diagonal(merged_map) -> float:
@@ -213,7 +205,7 @@ class RLExplorer(MultiRobotExplorerNode):
         return math.hypot(w, h)
 
     # ------------------------------------------------------------------
-    # Learning
+    # Centralised training (QMIX)
     # ------------------------------------------------------------------
 
     def _coverage(self, merged_map) -> float:
@@ -222,41 +214,54 @@ class RLExplorer(MultiRobotExplorerNode):
         coverage, _ = check_coverage(merged_map, self._expected_cells)
         return coverage
 
-    def _done(self, coverage: float) -> bool:
-        return coverage >= self._coverage_threshold
-
-    def _close_transition(
+    def _record_event(
         self,
-        name: str,
-        next_coverage: float,
-        next_feats: list[np.ndarray],
-        done: bool,
+        merged_map,
+        robots: list[RobotState],
+        options: dict[str, np.ndarray],
+        actions: dict[str, np.ndarray],
+        cands_cache: dict[str, list[FrontierCandidate]],
+        busy: set[str],
+        diag: float,
     ) -> None:
-        """Turn a robot's pending goal into a replay transition and train.
+        """Record a joint event (global state = training-only information)."""
+        n = len(self._agents)
+        act, mask, cand_list = assemble_joint(self._agents, actions, options)
 
-        The reward is the *shared* team coverage gain per second since the goal
-        was dispatched; every robot that acted this cycle receives the same team
-        reward (shared-reward CTDE). Decision period is the dt.
-        """
-        pending = self._pending.get(name)
-        if pending is None:
+        # Distinct frontier groups visible to the team (unfiltered sets).
+        groups: set = set()
+        for robot in robots:
+            cands = cands_cache.get(robot.name)
+            if cands is None:
+                cands = self.candidates_for(robot)
+            groups.update(c.frontier_cells for c in cands)
+        coverage = self._coverage(merged_map)
+        state = make_global_state(
+            coverage=coverage,
+            robot_positions=[(r.x, r.y) for r in robots],
+            n_frontier_groups=len(groups),
+            n_busy=len(busy),
+            n_agents=n,
+            map_diagonal=diag,
+        )
+        self._learn(self._recorder.record_event(
+            act, mask, cand_list, state, coverage, self._now()))
+
+    def _learn(self, t: JointTransition | None) -> None:
+        """Push a closed joint transition and run one QMIX train step."""
+        if t is None:
             return
-        feats, prev_coverage, _diag = pending
-        dt = self.get_parameter('decision_period').value
-        reward = compute_reward(prev_coverage, next_coverage, dt)
-        self._learner.push(Transition(feats, feats, reward, next_feats, done))
-        self._pending[name] = None
-
+        self._learner.push(t)
         loss = self._learner.train_step()
         if loss is not None and self._learner.step_count % 50 == 0:
             self.get_logger().info(
                 f'[rl] step={self._learner.step_count} loss={loss:.4f} '
-                f'e={self._learner.epsilon:.3f} r={reward:.3f} '
+                f'e={self._learner.epsilon:.3f} r={t.reward:.3f} '
                 f'buf={len(self._learner.replay)}'
             )
 
     def _watch_episode_file(self) -> None:
-        """Persist the shared learner once the episode ends.
+        """Close the last joint event (done) and persist once the episode ends.
 
         Both success and stuck/timeout episodes are kept: the shared coverage
         reward already discounts aborted episodes by their low gain, and throwing
@@ -268,11 +273,11 @@ class RLExplorer(MultiRobotExplorerNode):
         if not ep.exists():
             return
         reason = ep.read_text().strip()
-        # Close any still-open transitions at the final coverage.
         final_cov = (self._coverage(self._latest_map)
                      if self._latest_map is not None else 0.0)
-        for name in list(self._pending):
-            self._close_transition(name, final_cov, next_feats=[], done=True)
+        self._learn(self._recorder.close(final_cov, self._now()))
+        # Guarded by _committed, so epsilon decays exactly once per episode.
+        self._learner.end_episode()
         self._learner.save()
         self._committed = True
         self.get_logger().info(

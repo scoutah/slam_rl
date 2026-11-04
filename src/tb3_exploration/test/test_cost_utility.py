@@ -1,35 +1,16 @@
-"""Check information gain and coordinated assignment on hand-built snapshots."""
+"""Check coordinated cost-utility assignment on hand-built snapshots."""
 import math
 
 import numpy as np
 import pytest
 
-from tb3_exploration.cost_utility import Bid, greedy_assignment, visible_information
+from tb3_exploration.cost_utility import Bid, greedy_assignment
+from tb3_slam.information_gain import visible_information
 
 
 def _bid(robot, cell, cost, information, frontier=None):
     return Bid(robot, cell, cost, frozenset(information),
                frozenset(frontier if frontier is not None else [cell]))
-
-
-def test_known_wall_occludes_information_and_known_free_has_no_gain():
-    grid = np.zeros((17, 17), dtype=np.int8)
-    grid[8, 9] = 50
-    grid[:, 11] = 95
-    grid[:, 12:] = -1
-    visible = visible_information(grid, (8, 8), 0.5, 3.5)
-    assert (8, 9) in visible
-    assert all(col < 11 for _, col in visible)
-    assert (8, 8) not in visible
-    assert (8, 11) not in visible
-
-
-def test_information_stays_within_sensor_range_and_grid():
-    grid = np.full((20, 20), -1, dtype=np.int8)
-    visible = visible_information(grid, (0, 0), 0.5, 2.0)
-    assert (0, 3) in visible
-    assert (0, 8) not in visible
-    assert all(0 <= r < 20 and 0 <= c < 20 for r, c in visible)
 
 
 def test_more_information_can_beat_the_nearest_frontier():

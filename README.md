@@ -82,7 +82,7 @@ lesen.
 Zuweisung. Der Nutzen schätzt die sichtbare unbekannte/unsichere Fläche innerhalb
 von 3,5 m; bekannte Wände verdecken dahinterliegende Zellen. Bereits vergebene
 Frontiers und überlappende Sichtbereiche werden bei weiteren Zuweisungen
-berücksichtigt. Laufende Fahrten bleiben stabil, freie Roboter erhalten neue Ziele.
+berücksichtigt. Ein Rivalen-Abschlag (`utility_gamma`, 0,3) bestraft Ziele, die dem Teamkollegen (Ziel bzw. Position) näher liegen als dem Bieter – so fahren Roboter nicht quer über die Karte in das Gebiet des anderen. Laufende Fahrten bleiben stabil, freie Roboter erhalten neue Ziele.
 Die Methode verwendet auf 8×8 und 12×12 dieselben Parameter und lernt nichts.
 Formel und Greedy-Entscheidung sind in `tb3_exploration/cost_utility.py` dokumentiert.
 
@@ -102,7 +102,7 @@ betreffenden Stelle im Code, nicht hier und nicht in langen Datei-Headern.
 | `tb3_slam/multi_robot.py` | Pure-Python-Namespacing der Upstream-TurtleBot3-Configs (model.sdf / Bridge / Cartographer-lua / Nav2-Params; globale Costmap und `bt_navigator` planen auf der gemergten `/map`, Frame `map`). Unit-getestet, kein ROS. |
 | `tb3_slam/map_merging.py` | Pure-numpy-Fusion: feste Ausdehnung im `map`-Frame, zustandsbehaftete Zell-Priorität (WALL > sticky-FREE > UNCERTAIN > UNKNOWN). Erhält die `frontier_utils`-Zellklassen. `clear_robot_footprints` gibt die aktuelle Footprint-Scheibe (0,22 m) jedes Roboters frei, damit ein Teamkollege, der ihn als Wand sieht, seinen Frontier-Seed nicht dauerhaft blockiert. |
 | `tb3_slam/map_merger.py` | ROS-Node um `map_merging`: abonniert `/<ns>/map`, publiziert `/map` mit 2 Hz TRANSIENT_LOCAL. Liest Roboterposen aus `/<ns>/tf[_static]` + globalem `/tf_static` (unabhängig vom Viz-`tf_relay`) für `clear_robot_footprints`. |
-| `tb3_slam/frontier_utils.py` | Geteilte Frontier-Erkennung: Zellklassen (0–25 frei, 26–74 unsicher, 75–100 Wand, −1 unbekannt), BFS über freie Zellen, Gruppen-Centroids (+ zugehörige Frontier-Zellen `centroid_frontiers`): Mittelwert → nächste freie Zelle → ist sie nicht footprint-sicher/erreichbar, wird das Ziel entlang des freien Zellpfads (`free_space_parents`) zurück bis zur letzten erreichbaren Zelle geschoben, kein Ziel bei fehlendem Pfad; BFS-Seed fällt auf freie Nachbarzellen zurück, wenn die Roboterzelle nicht frei ist. Keine ROS-Messages außer OccupancyGrid. |
+| `tb3_slam/frontier_utils.py` | Geteilte Frontier-Erkennung: Zellklassen (0–25 frei, 26–74 unsicher, 75–100 Wand, −1 unbekannt), BFS über freie Zellen, Aussichtspunkt-Ziel `_viewpoint_goal` (liegt der Centroid < 0,75 m vom Roboter, wird statt „kein Ziel“ eine erreichbare Zelle ≥ 0,75 m vom Roboter und ≤ 2 m vom Centroid mit freier Sichtlinie gewählt), Phantom-Filter `filter_phantom_groups` (verwirft Gruppen < 4 Zellen und „Wand-Sandwich“-Gruppen: unsichere Zelle mit Wand, aber ohne Unbekannt im 7×7-Fenster), Gruppen-Centroids (+ zugehörige Frontier-Zellen `centroid_frontiers`): Mittelwert → nächste freie Zelle → ist sie nicht footprint-sicher/erreichbar, wird das Ziel zuerst um den Footprint-Radius (0,22 m) von der Frontier-Linie nach außen geschoben (Normale zur freien Seite); scheitert das (enger Raum), gilt die erste erreichbare Zelle auf dem kürzesten freien Zellpfad (`free_space_parents`, Dijkstra 8-verbunden mit Wandabstands-Strafe wie die Nav2-Costmap, damit der Pfad nicht an der Wand klebt) vom Ziel Richtung Roboter, kein Ziel bei fehlendem Pfad; BFS-Seed fällt auf freie Nachbarzellen zurück, wenn die Roboterzelle nicht frei ist. Keine ROS-Messages außer OccupancyGrid. |
 | `tb3_slam/frontier_viz.py` | RViz-MarkerArray für Frontiers, Centroids und je Roboter ein farbiges Ziel (`extra_goals`). Hält ROS-Viz aus `frontier_utils` heraus. |
 | `tb3_slam/multi_robot_explorer.py` | Basis-Node + ROS-freie Typen (`Goal`, `RobotState`, `FrontierCandidate`). Besitzt alle ROS-I/O und Ziel-Überwachung; publiziert bei jedem `/map`-Update die Frontier-/Centroid-Marker auf `/frontiers_viz`. Speist seinen TF-Buffer direkt aus `/<ns>/tf[_static]` (plus globales `/tf_static` für `map→<ns>/map`), also unabhängig vom Viz-`tf_relay`. Dispatcht Ziele im robotereigenen `<ns>/map`-Frame (Nav2 kennt den gemergten `map`-Frame nicht). Subklassen überschreiben nur `select_goals(merged_map, [RobotState])`. |
 | `tb3_slam/information_gain.py` | Geteilte, verdeckungsbewusste Informationsgewinn-Schätzung für Frontier-Ziele (`visible_information`: Strahlen im Sensorradius, enden an bekannten Wänden; `InformationField`: Cache pro Karte, Anteil der Sensorfläche). Von klassischem und RL-Explorer genutzt. Keine ROS-Imports. |
@@ -120,7 +120,7 @@ betreffenden Stelle im Code, nicht hier und nicht in langen Datei-Headern.
 | Datei | Inhalt |
 |---|---|
 | `tb3_exploration/multi_robot_explorer.py` | `ClassicExplorer`: asynchrone, pro Roboter serielle Nav2-Pfadprüfung, aktuelle Kartenvalidierung, Greedy-Teamzuweisung, Reservierungen und Wiederanlauf nach Fehlzielen. |
-| `tb3_exploration/cost_utility.py` | Stdlib-Entscheidungskern: Greedy-Zuweisung mit marginalem Informationsgewinn und normierten Pfadkosten (die Informationszellen kommen aus `tb3_slam/information_gain.py`). |
+| `tb3_exploration/cost_utility.py` | Stdlib-Entscheidungskern: Greedy-Zuweisung mit marginalem Informationsgewinn, normierten Pfadkosten und Rivalen-Abschlag `rival_gap` (die Informationszellen kommen aus `tb3_slam/information_gain.py`). |
 | `tb3_exploration/frontier_explorer.py` | Alter Single-Robot-Frontier-Node (nicht mehr gelauncht). Referenz für Ziel-Überwachung/Ranking. |
 | `test/test_cost_utility.py` | Deterministische Prüfungen von Nutzen, Kosten, Teamkopplung und exklusiver Zuweisung. |
 | `test/test_classic_explorer.py` | ROS-/Nav2-Grenztests für Pfadbestätigung, Timeouts, verspätete Antworten, Kartenänderungen und Zielüberwachung. |
@@ -139,10 +139,13 @@ betreffenden Stelle im Code, nicht hier und nicht in langen Datei-Headern.
 |---|---|
 | `training_runner.py` | Episoden-Loop: Welt generieren/wiederverwenden, Sim starten (`--sim-speed`), `/tmp/slam_episode_done` pollen, Prozessgruppe killen, CSV in `results/` schreiben (`elapsed_s` = Sim-Sekunden, dazu `wall_s`, `sim_speed`). |
 | `tools/check_world_connectivity.py` | Offline-Check (nur numpy): Freiraum-Konnektivität + Spawn-Erreichbarkeit für beide Studiengrößen. |
+| `tools/dump_map.py` | Debug-Tool (ROS, System-Python `/usr/bin/python3`, sourced Umgebung): speichert während einer laufenden Sim alle 10 s die gemergte `/map` plus Roboterzellen als `map_NNN.npz` nach `/tmp/slam_map_dump/` (`--out`, `--period`). |
+| `tools/analyze_map_dump.py` | Offline (numpy + pillow): spielt einen Dump durch die Frontier-Pipeline und rendert PNG (Frontiers rot, Ziele blau, Roboter grün) + gibt Gruppen/Ziele aus. |
 
 ### Inter-Prozess-Dateien (`/tmp`)
 
 - `/tmp/slam_world_meta.json` — `expected_traversable_cells`, `spawns`, `world_size`; von `generate_random_world` geschrieben, von `coverage_monitor` gelesen. Beim Wiederverwenden einer Welt wird deren `<world>.meta.json`-Sidecar hierher kopiert.
+- `/tmp/slam_map_dump/map_NNN.npz` — Karten-Snapshots von `tools/dump_map.py` (nur bei Bedarf).
 - `/tmp/slam_episode_done` — Episoden-Endgrund; von `episode_manager` geschrieben, von `training_runner.py` gepollt.
 - `/tmp/slam_episode_done.sim_s` — Sim-Sekunden seit Episodenstart; von `episode_manager` jede Sim-Sekunde (atomar) geschrieben, vom Runner für `elapsed_s` gelesen.
 - `/tmp/slam_world_speed.sdf` — Kopie der Welt mit angepasstem Physik-Timing, nur wenn `SLAM_SIM_SPEED` ≠ 1.

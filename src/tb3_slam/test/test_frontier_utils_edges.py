@@ -110,3 +110,14 @@ def test_find_frontiers_global_scan_excludes_wall_neighbours():
 def test_find_frontiers_empty_when_no_uncertain():
     grid = np.zeros((4, 4), dtype=np.int8)
     assert find_frontiers(grid, robot_grid_pos=None) == []
+
+
+def test_frontier_next_to_robot_gets_a_viewpoint_instead_of_no_goal():
+    from tb3_slam.frontier_utils import MIN_GOAL_GRID_DIST, find_centroid
+    grid = np.zeros((40, 80), dtype=np.int8)
+    grid[:, 0:2] = 50                      # uncertain band at the west edge
+    group = [(r, 2) for r in range(15, 25)]
+    robot = (20, 4)                        # right next to the frontier
+    goal = find_centroid(group, grid, robot_grid_pos=robot)
+    assert goal is not None
+    assert np.hypot(goal[0] - robot[0], goal[1] - robot[1]) >= MIN_GOAL_GRID_DIST

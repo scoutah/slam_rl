@@ -226,36 +226,94 @@ def reachable_goal_cells(
     return reachable & safe
 
 
+def free_space_parents(
+    grid: np.ndarray,
+    robot_grid_pos: tuple[int, int] | None,
+    include_start: bool = False,
+) -> dict[tuple[int, int], tuple[int, int] | None]:
+    """Cardinal BFS over FREE cells from the robot; maps each cell to its parent.
+
+    Roots (the robot cell, or its free cardinal neighbours if the robot cell
+    does not read FREE) map to ``None``. ``include_start`` treats the robot cell
+    as free even if it is not, like ``find_frontiers`` does. Following parents
+    from any visited cell leads back to the robot over a real FREE-cell path,
+    so a cell that is missing from the result cannot be reached at all.
+    """
+    rows, cols = grid.shape
+    parents: dict[tuple[int, int], tuple[int, int] | None] = {}
+    if robot_grid_pos is None:
+        return parents
+    sr, sc = robot_grid_pos
+    if not (0 <= sr < rows and 0 <= sc < cols):
+        return parents
+
+    def is_free(r: int, c: int) -> bool:
+        return 0 <= grid[r, c] <= FREE_MAX
+
+    queue: deque[tuple[int, int]] = deque()
+    if include_start or is_free(sr, sc):
+        roots = [(sr, sc)]
+    else:
+        roots = [(sr + dr, sc + dc) for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1))
+                 if 0 <= sr + dr < rows and 0 <= sc + dc < cols and is_free(sr + dr, sc + dc)]
+    for root in roots:
+        parents[root] = None
+        queue.append(root)
+    while queue:
+        r, c = queue.popleft()
+        for nr, nc in ((r - 1, c), (r + 1, c), (r, c - 1), (r, c + 1)):
+            if (0 <= nr < rows and 0 <= nc < cols and (nr, nc) not in parents
+                    and is_free(nr, nc)):
+                parents[nr, nc] = (r, c)
+                queue.append((nr, nc))
+    return parents
+
+
 def find_centroid(
     group: list[tuple[int, int]],
     grid: np.ndarray,
     robot_grid_pos: tuple[int, int] | None = None,
     *,
     reachable_cells: np.ndarray | None = None,
+    parents: dict[tuple[int, int], tuple[int, int] | None] | None = None,
 ) -> tuple[int, int] | None:
-    """Return a reachable approach goal closest to the group's centroid.
+    """Return the goal cell for a frontier group, or ``None`` if there is none.
 
-    Search only the robot's connected footprint-safe FREE region, never through
-    unknown or uncertain cells. For a frontier beyond a narrow corridor this
-    selects a safe approach on the robot's side. Goals retain the minimum
-    motion distance. The pipeline supplies its mask once per map; direct calls
-    use five cells of clearance (0.25 m at the study resolution of 0.05 m).
+    1. Average the group's cells and take the nearest FREE cell (the target).
+    2. If the target is footprint-safe and reachable (``reachable_cells``), it
+       is the goal.
+    3. Otherwise walk the robot's FREE-cell path to the target and take the
+       last cell on it that is reachable: the goal is pushed back along the
+       route to the point the robot can really get to. Nearest-by-distance
+       would be wrong here, because it can lie on the far side of a wall.
+
+    Returns ``None`` if the target cannot be reached over FREE cells at all, or
+    if the goal would be closer than ``MIN_GOAL_GRID_DIST`` to the robot. The
+    pipeline passes ``reachable_cells`` and ``parents`` once per map; direct
+    calls compute them with five cells of clearance (0.25 m at 0.05 m).
     """
     if not group or robot_grid_pos is None:
         return None
     n = len(group)
-    cr = sum(r for r, _ in group) // n
-    cc = sum(c for _, c in group) // n
+    mean = (sum(r for r, _ in group) // n, sum(c for _, c in group) // n)
     if reachable_cells is None:
         reachable_cells = reachable_goal_cells(grid, robot_grid_pos)
-    candidates = np.argwhere(reachable_cells)
-    distance_from_robot = np.sum((candidates - robot_grid_pos) ** 2, axis=1)
-    candidates = candidates[distance_from_robot >= MIN_GOAL_GRID_DIST ** 2]
-    if len(candidates) == 0:
+    if parents is None:
+        parents = free_space_parents(grid, robot_grid_pos)
+    free_cells = np.argwhere((grid >= 0) & (grid <= FREE_MAX))
+    if len(free_cells) == 0 or not parents:
         return None
-    distance_to_frontier = np.sum((candidates - (cr, cc)) ** 2, axis=1)
-    row, col = candidates[np.argmin(distance_to_frontier)]
-    return int(row), int(col)
+    nearest = np.argmin(np.sum((free_cells - mean) ** 2, axis=1))
+    cell: tuple[int, int] | None = (int(free_cells[nearest][0]), int(free_cells[nearest][1]))
+    if cell not in parents:
+        return None
+    while cell is not None and not reachable_cells[cell]:
+        cell = parents[cell]
+    if cell is None:
+        return None
+    if math.dist(cell, robot_grid_pos) < MIN_GOAL_GRID_DIST:
+        return None
+    return cell
 
 
 def centroids_from_map(
@@ -308,6 +366,7 @@ def centroids_from_map_debug(
         math.ceil(GOAL_CLEARANCE_M / msg.info.resolution) if msg.info.resolution > 0 else 5
     )
     reachable = reachable_goal_cells(grid, robot_grid_pos, clearance)
+    parents = free_space_parents(grid, robot_grid_pos, include_start=True)
 
     centroids: list[tuple[int, int]] = []
     centroid_group_sizes: list[int] = []
@@ -316,6 +375,7 @@ def centroids_from_map_debug(
     for group in groups:
         centroid = find_centroid(
             group, grid, robot_grid_pos=robot_grid_pos, reachable_cells=reachable,
+            parents=parents,
         )
         if centroid is not None:
             if centroid in centroids:

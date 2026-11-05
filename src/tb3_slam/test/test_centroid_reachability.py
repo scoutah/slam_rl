@@ -36,12 +36,11 @@ def _reachable(grid, start):
 
 @pytest.mark.parametrize('barrier', [-1, 50, 95])
 def test_centroid_never_crosses_nonfree_barrier(barrier):
+    """A target cut off from the robot by non-FREE cells yields no goal at all."""
     grid = _rooms(20)
     grid[:, 45:55] = barrier
     robot = (40, 15)
-    goal = find_centroid([(row, 88) for row in range(25, 56)], grid, robot)
-    assert goal is not None
-    assert goal in _reachable(grid, robot)
+    assert find_centroid([(row, 88) for row in range(25, 56)], grid, robot) is None
 
 
 def test_narrow_corridor_gets_safe_approach_goal_instead_of_far_room():
@@ -108,3 +107,27 @@ def test_robot_on_nonfree_cell_with_free_ahead_still_gets_goal():
     goal = find_centroid([(40, 88)], grid, (40, 15))
     assert goal is not None
     assert goal in _reachable(grid, (41, 15))
+
+
+def _rooms_with_far_narrow_door():
+    """Room A (robot) and room B joined only by a narrow door at the top of the wall."""
+    grid = np.full((80, 100), 95, dtype=np.int8)
+    grid[10:70, 5:40] = 0
+    grid[10:70, 46:90] = 0
+    grid[12:17, 40:46] = 0  # 0.25 m door: not traversable, but a FREE-cell path
+    return grid
+
+
+def test_goal_is_pushed_back_along_the_route_not_across_the_wall():
+    """Frontier in B hugs the wall; the nearest reachable cell is in A, behind the wall.
+
+    The goal must instead be the last reachable cell on the route to the
+    frontier, i.e. in front of the door, not the A cell next to the frontier.
+    """
+    grid = _rooms_with_far_narrow_door()
+    robot = (40, 10)
+    goal = find_centroid([(60, 47)], grid, robot)
+    assert goal is not None
+    assert goal[1] < 40
+    assert goal[0] < 25  # near the door, far from the A cells beside the frontier
+    assert goal in _reachable(grid, robot)

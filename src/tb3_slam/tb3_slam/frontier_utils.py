@@ -1,5 +1,6 @@
 """Shared frontier detection utilities used by all exploration strategies."""
 from collections import deque
+import heapq
 import math
 
 from nav_msgs.msg import OccupancyGrid
@@ -161,6 +162,12 @@ def find_groups(frontiers: list[tuple[int, int]]) -> list[list[tuple[int, int]]]
 MIN_GOAL_GRID_DIST = 15
 # Nav2's default robot_radius, not its entire (non-lethal) inflation layer.
 GOAL_CLEARANCE_M = 0.22
+# Nav2's costmap keeps the robot off walls; the fallback path mimics that by
+# penalising cells closer than this to a non-free cell (inflation radius).
+PATH_INFLATION_M = 0.55
+PATH_WALL_PENALTY = 8.0
+_SQRT2 = math.sqrt(2.0)
+_STEPS_8 = ((-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (-1, 1), (1, -1), (1, 1))
 
 
 def reachable_goal_cells(
@@ -226,18 +233,41 @@ def reachable_goal_cells(
     return reachable & safe
 
 
+def _wall_clearance(free: np.ndarray, max_cells: int) -> np.ndarray:
+    """Chebyshev distance (cells) to the nearest non-free cell, capped at ``max_cells``."""
+    rows, cols = free.shape
+    dist = np.full(free.shape, max_cells, dtype=np.int32)
+    covered = ~free
+    dist[covered] = 0
+    for k in range(1, max_cells):
+        padded = np.pad(covered, 1, constant_values=True)
+        grown = covered.copy()
+        for dr in range(3):
+            for dc in range(3):
+                grown |= padded[dr:dr + rows, dc:dc + cols]
+        dist[grown & ~covered] = k
+        covered = grown
+    return dist
+
+
 def free_space_parents(
     grid: np.ndarray,
     robot_grid_pos: tuple[int, int] | None,
     include_start: bool = False,
+    inflation_cells: int = round(PATH_INFLATION_M / 0.05),
 ) -> dict[tuple[int, int], tuple[int, int] | None]:
-    """Cardinal BFS over FREE cells from the robot; maps each cell to its parent.
+    """Cheapest FREE-cell paths from the robot as a parent map (Dijkstra, 8-connected).
 
     Roots (the robot cell, or its free cardinal neighbours if the robot cell
     does not read FREE) map to ``None``. ``include_start`` treats the robot cell
     as free even if it is not, like ``find_frontiers`` does. Following parents
     from any visited cell leads back to the robot over a real FREE-cell path,
     so a cell that is missing from the result cannot be reached at all.
+
+    Step cost grows near walls, like Nav2's inflated costmap, so the path
+    keeps to the middle of rooms instead of hugging the wall; a plain BFS tree
+    runs along the room edge and pulled fallback goals far from their frontier.
+    Diagonal steps cost sqrt 2 and never cut corners.
     """
     rows, cols = grid.shape
     parents: dict[tuple[int, int], tuple[int, int] | None] = {}
@@ -246,27 +276,76 @@ def free_space_parents(
     sr, sc = robot_grid_pos
     if not (0 <= sr < rows and 0 <= sc < cols):
         return parents
+    free = (grid >= 0) & (grid <= FREE_MAX)
+    inflation = max(1, inflation_cells)
+    clearance = _wall_clearance(free, inflation)
+    # Per-cell multiplier: 1 away from walls, up to 1 + PATH_WALL_PENALTY at them.
+    factor = 1.0 + PATH_WALL_PENALTY * ((inflation - clearance) / inflation) ** 2
 
-    def is_free(r: int, c: int) -> bool:
-        return 0 <= grid[r, c] <= FREE_MAX
-
-    queue: deque[tuple[int, int]] = deque()
-    if include_start or is_free(sr, sc):
+    if include_start or free[sr, sc]:
         roots = [(sr, sc)]
     else:
         roots = [(sr + dr, sc + dc) for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1))
-                 if 0 <= sr + dr < rows and 0 <= sc + dc < cols and is_free(sr + dr, sc + dc)]
+                 if 0 <= sr + dr < rows and 0 <= sc + dc < cols and free[sr + dr, sc + dc]]
+    dist: dict[tuple[int, int], float] = {}
+    heap: list[tuple[float, tuple[int, int]]] = []
     for root in roots:
         parents[root] = None
-        queue.append(root)
-    while queue:
-        r, c = queue.popleft()
-        for nr, nc in ((r - 1, c), (r + 1, c), (r, c - 1), (r, c + 1)):
-            if (0 <= nr < rows and 0 <= nc < cols and (nr, nc) not in parents
-                    and is_free(nr, nc)):
+        dist[root] = 0.0
+        heap.append((0.0, root))
+    heapq.heapify(heap)
+    done: set[tuple[int, int]] = set()
+    while heap:
+        d, (r, c) = heapq.heappop(heap)
+        if (r, c) in done:
+            continue
+        done.add((r, c))
+        for dr, dc in _STEPS_8:
+            nr, nc = r + dr, c + dc
+            if not (0 <= nr < rows and 0 <= nc < cols) or not free[nr, nc]:
+                continue
+            if dr and dc and not (free[r + dr, c] and free[r, c + dc]):
+                continue
+            nd = d + (_SQRT2 if dr and dc else 1.0) * factor[nr, nc]
+            if nd < dist.get((nr, nc), math.inf):
+                dist[nr, nc] = nd
                 parents[nr, nc] = (r, c)
-                queue.append((nr, nc))
+                heapq.heappush(heap, (nd, (nr, nc)))
     return parents
+
+
+def _pop_outward(
+    target: tuple[int, int],
+    group: list[tuple[int, int]],
+    grid: np.ndarray,
+    reachable_cells: np.ndarray,
+    push_cells: int,
+) -> tuple[int, int] | None:
+    """Move ``target`` ``push_cells`` away from the frontier line, if that is reachable.
+
+    The outward direction is the sum of vectors from each frontier cell's
+    UNCERTAIN cardinal neighbours to that cell, i.e. the normal of the frontier
+    line pointing into known free space. For a line parallel to the robot this
+    steps straight off the line. Returns ``None`` when there is no direction or
+    the popped cell is not footprint-safe and reachable (tight space).
+    """
+    rows, cols = grid.shape
+    vr = vc = 0.0
+    for r, c in group:
+        for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+            nr, nc = r + dr, c + dc
+            if (0 <= nr < rows and 0 <= nc < cols
+                    and FRONTIER_MIN <= grid[nr, nc] <= FRONTIER_MAX):
+                vr -= dr
+                vc -= dc
+    norm = math.hypot(vr, vc)
+    if norm == 0.0 or push_cells <= 0:
+        return None
+    pr = target[0] + round(vr / norm * push_cells)
+    pc = target[1] + round(vc / norm * push_cells)
+    if 0 <= pr < rows and 0 <= pc < cols and reachable_cells[pr, pc]:
+        return pr, pc
+    return None
 
 
 def find_centroid(
@@ -276,16 +355,19 @@ def find_centroid(
     *,
     reachable_cells: np.ndarray | None = None,
     parents: dict[tuple[int, int], tuple[int, int] | None] | None = None,
+    push_cells: int = 5,
 ) -> tuple[int, int] | None:
     """Return the goal cell for a frontier group, or ``None`` if there is none.
 
     1. Average the group's cells and take the nearest FREE cell (the target).
-    2. If the target is footprint-safe and reachable (``reachable_cells``), it
-       is the goal.
-    3. Otherwise walk the robot's FREE-cell path to the target and take the
-       last cell on it that is reachable: the goal is pushed back along the
-       route to the point the robot can really get to. Nearest-by-distance
-       would be wrong here, because it can lie on the far side of a wall.
+    2. Pop the target outward: move it ``push_cells`` (the robot clearance)
+       away from the frontier line. If that cell is footprint-safe and
+       reachable (``reachable_cells``), it is the goal. For a long line next
+       to the robot this lands mid-line, off the line.
+    3. In a tight space the pop fails; walk the robot's FREE-cell path to the
+       target and take the first cell on it, starting at the target, that is
+       reachable. Nearest-by-distance would be wrong here, because it can lie
+       on the far side of a wall.
 
     Returns ``None`` if the target cannot be reached over FREE cells at all, or
     if the goal would be closer than ``MIN_GOAL_GRID_DIST`` to the robot. The
@@ -307,6 +389,9 @@ def find_centroid(
     cell: tuple[int, int] | None = (int(free_cells[nearest][0]), int(free_cells[nearest][1]))
     if cell not in parents:
         return None
+    popped = _pop_outward(cell, group, grid, reachable_cells, push_cells)
+    if popped is not None:
+        cell = popped
     while cell is not None and not reachable_cells[cell]:
         cell = parents[cell]
     if cell is None:
@@ -366,7 +451,12 @@ def centroids_from_map_debug(
         math.ceil(GOAL_CLEARANCE_M / msg.info.resolution) if msg.info.resolution > 0 else 5
     )
     reachable = reachable_goal_cells(grid, robot_grid_pos, clearance)
-    parents = free_space_parents(grid, robot_grid_pos, include_start=True)
+    parents = free_space_parents(
+        grid, robot_grid_pos, include_start=True,
+        inflation_cells=(
+            math.ceil(PATH_INFLATION_M / msg.info.resolution)
+            if msg.info.resolution > 0 else 11),
+    )
 
     centroids: list[tuple[int, int]] = []
     centroid_group_sizes: list[int] = []
@@ -375,7 +465,7 @@ def centroids_from_map_debug(
     for group in groups:
         centroid = find_centroid(
             group, grid, robot_grid_pos=robot_grid_pos, reachable_cells=reachable,
-            parents=parents,
+            parents=parents, push_cells=clearance,
         )
         if centroid is not None:
             if centroid in centroids:

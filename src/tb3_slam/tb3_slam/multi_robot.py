@@ -137,15 +137,34 @@ def _namespace_nav2_node(node: object, ns: str) -> None:
             _namespace_nav2_node(item, ns)
 
 
-def namespace_nav2_params(params: dict, ns: str) -> dict:
+def use_merged_map_for_global_planning(params: dict, merged_frame: str) -> None:
+    """Point the global costmap and ``bt_navigator`` at the merged map, in place.
+
+    ``StaticLayer`` of a non-rolling costmap copies the incoming grid 1:1 into
+    the costmap and does not transform between frames, so the costmap's
+    ``global_frame`` must be the merged map's own frame. The robot's TF tree
+    then needs ``merged_frame -> <ns>/map`` (see ``sim_slam.launch.py``).
+    ``map_topic`` is absolute so it is not resolved under the robot namespace.
+    """
+    costmap = params['global_costmap']['global_costmap']['ros__parameters']
+    costmap['global_frame'] = merged_frame
+    costmap.setdefault('static_layer', {})['map_topic'] = f'/{merged_frame}'
+    params['bt_navigator']['ros__parameters']['global_frame'] = merged_frame
+
+
+def namespace_nav2_params(params: dict, ns: str, merged_frame: str | None = None) -> dict:
     """Return a copy of parsed nav2 params with frames and absolute topics under ``ns``.
 
     Frame values (keys ending in ``frame``/``frame_id``, or exactly ``frame``)
     get ``<ns>/`` prefixed. Absolute topic values (keys ending in ``topic``
     starting with ``/``) become ``/<ns>/...``. Relative topics stay unchanged.
-    The input is not mutated, and applying the function twice gives the same
-    result as applying it once.
+    With ``merged_frame`` the global costmap and ``bt_navigator`` plan on the
+    merged map instead (see ``use_merged_map_for_global_planning``), so a robot
+    can navigate into areas only its teammate has mapped. The input is not
+    mutated, and applying the function twice gives the same result as once.
     """
     rewritten = copy.deepcopy(params)
     _namespace_nav2_node(rewritten, ns)
+    if merged_frame is not None:
+        use_merged_map_for_global_planning(rewritten, merged_frame)
     return rewritten

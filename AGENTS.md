@@ -77,8 +77,11 @@ global `/tf`; every node remaps `/tf`→`tf`), and prefixed frames `<ns>/map →
 Inspect: `ros2 run tf2_ros tf2_echo r1/map r1/base_link --ros-args -r /tf:=/r1/tf -r /tf_static:=/r1/tf_static`.
 The explorer base node feeds its TF buffer from each `/<ns>/tf[_static]` directly (plus global
 `/tf_static` for the `map→<ns>/map` offsets), so poses resolve headless without the viz-only
-`tf_relay`, and it dispatches every goal in the robot's own `<ns>/map` frame, since each robot's
-Nav2 cannot transform the merged `map` frame.
+`tf_relay`, and it dispatches every goal in the robot's own `<ns>/map` frame (Nav2 resolves it to `map` via TF).
+Nav2's global costmap (`static_layer`) and `bt_navigator` use the **merged `/map`** in frame `map`
+(`namespace_nav2_params(..., merged_frame)`; a non-rolling static layer does not transform frames), so
+robots can plan into areas only the teammate mapped. For that, `map → <ns>/map` is also published on
+each `/<ns>/tf_static`.
 
 **Map merging** (`map_merging.py` numpy + `map_merger.py` node): each `/<ns>/map` is placed by its
 origin plus the robot's spawn pose onto one fixed-extent grid (world +1 m, 0.05 m, frame `map`,

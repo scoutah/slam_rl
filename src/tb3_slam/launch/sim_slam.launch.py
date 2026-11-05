@@ -130,7 +130,8 @@ def write_robot_configs(ns: str, out_dir: Path) -> dict[str, str]:
     nav2_src = Path(get_package_share_directory('nav2_bringup')) / 'params' / 'nav2_params.yaml'
     nav2 = robot_dir / 'nav2_params.yaml'
     nav2.write_text(yaml.safe_dump(
-        namespace_nav2_params(yaml.safe_load(nav2_src.read_text()), ns), sort_keys=False,
+        namespace_nav2_params(yaml.safe_load(nav2_src.read_text()), ns, MERGED_MAP_FRAME),
+        sort_keys=False,
     ))
 
     return {
@@ -314,9 +315,11 @@ def map_merge_stack(spawns: list[tuple[float, float]], world_size: float,
         Node(
             package='tf2_ros',
             executable='static_transform_publisher',
-            name=f'static_tf_{ns}_map',
+            name=f'static_tf_{ns}_map{suffix}',
             arguments=[
                 '--x', str(x), '--y', str(y), '--z', '0',
+    # The same offsets also go onto each robot's own /<ns>/tf_static so Nav2's
+    # global costmap (frame ``map``) can resolve map -> <ns>/map.
                 '--yaw', '0', '--pitch', '0', '--roll', '0',
                 '--frame-id', MERGED_MAP_FRAME,
                 '--child-frame-id', frame(ns, 'map'),
@@ -329,9 +332,14 @@ def map_merge_stack(spawns: list[tuple[float, float]], world_size: float,
     return [*static_tfs, merge]
 
 
+            remappings=remap,
 def explorer_node(mode, use_sim_time, coverage_threshold, episode_file) -> Node:
     """Standalone explorer node for the selected method.
 
+        for suffix, remap in (
+            ('', []),
+            ('_robot_tree', [('/tf_static', topic(ns, 'tf_static'))]),
+        )
     ``classic`` runs the cost-utility explorer in ``tb3_exploration``; ``rl``
     runs the learned explorer in ``tb3_reinforced_exploration``. Each is its own
     node reading the merged global ``/map`` and dispatching goals to the

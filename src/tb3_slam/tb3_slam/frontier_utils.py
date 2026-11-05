@@ -154,6 +154,57 @@ def find_groups(frontiers: list[tuple[int, int]]) -> list[list[tuple[int, int]]]
     return groups
 
 
+# Phantom-frontier filter (see ``filter_phantom_groups``). Cells at 0.05 m.
+MIN_GROUP_CELLS = 4        # a frontier line shorter than 0.2 m is mapping noise
+PHANTOM_WINDOW = 3         # Chebyshev radius (cells) searched around uncertain cells
+PHANTOM_SANDWICH_FRAC = 0.6
+
+
+def filter_phantom_groups(
+    grid: np.ndarray,
+    groups: list[list[tuple[int, int]]],
+) -> list[list[tuple[int, int]]]:
+    """Drop frontier groups that are not real openings into unexplored space.
+
+    Cartographer leaves thin bands of UNCERTAIN cells along walls. They pass the
+    5x5 wall-exclusion of ``find_frontiers`` but the robot can never "explore"
+    them, so they never vanish. Two rules (the sizes are 0.05 m cells):
+
+    1. Too small: fewer than ``MIN_GROUP_CELLS`` cells.
+    2. Wall sandwich: for each group cell take its UNCERTAIN cardinal
+       neighbours. If one has a WALL within ``PHANTOM_WINDOW`` cells and no
+       UNKNOWN cell there, the uncertain pixel is squeezed between free space
+       and a wall with nothing unexplored behind it. A group is dropped when
+       at least ``PHANTOM_SANDWICH_FRAC`` of its cells are sandwiched.
+       A real frontier has UNKNOWN space behind it, so it is kept.
+    """
+    rows, cols = grid.shape
+    w = PHANTOM_WINDOW
+    kept: list[list[tuple[int, int]]] = []
+    for group in groups:
+        if len(group) < MIN_GROUP_CELLS:
+            continue
+        sandwiched = 0
+        for r, c in group:
+            is_sandwich = False
+            for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+                ur, uc = r + dr, c + dc
+                if not (0 <= ur < rows and 0 <= uc < cols):
+                    continue
+                if not FRONTIER_MIN <= grid[ur, uc] <= FRONTIER_MAX:
+                    continue
+                win = grid[max(0, ur - w):ur + w + 1, max(0, uc - w):uc + w + 1]
+                if (win >= WALL_MIN).any() and not (win == UNKNOWN).any():
+                    is_sandwich = True
+                else:
+                    is_sandwich = False
+                    break  # one genuinely open neighbour makes the cell real
+            sandwiched += is_sandwich
+        if sandwiched / len(group) < PHANTOM_SANDWICH_FRAC:
+            kept.append(group)
+    return kept
+
+
 # Minimum grid-cell distance between goal and robot. Nav2's default xy_goal_
 # tolerance is ~0.25m (5 cells at 0.05m). In practice we see Nav2 declare
 # "Goal succeeded" in <50 ms even at ~0.43m — likely a map/TF origin drift
@@ -446,7 +497,9 @@ def centroids_from_map_debug(
         robot_cell_value = int(grid[robot_grid_pos[0], robot_grid_pos[1]])
 
     frontiers = find_frontiers(grid, free_seeds=free_seeds, robot_grid_pos=robot_grid_pos)
-    groups = find_groups(frontiers)
+    n_raw_frontiers = len(frontiers)
+    groups = filter_phantom_groups(grid, find_groups(frontiers))
+    frontiers = [cell for g in groups for cell in g]
     clearance = (
         math.ceil(GOAL_CLEARANCE_M / msg.info.resolution) if msg.info.resolution > 0 else 5
     )
@@ -507,6 +560,7 @@ def centroids_from_map_debug(
         'n_wall': n_wall,
         'n_unknown': n_unknown,
         'n_frontiers': len(frontiers),
+        'n_phantom_frontiers': n_raw_frontiers - len(frontiers),
         'n_groups': len(groups),
         'n_centroids': len(centroids),
         'n_dropped_groups': len(groups) - len(centroids),

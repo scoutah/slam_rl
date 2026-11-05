@@ -387,8 +387,8 @@ def main() -> None:
                         help='Exploration strategy (default: classic)')
     parser.add_argument('--episodes', type=int, default=10,
                         help='Number of episodes to run (default: 10)')
-    parser.add_argument('--threshold', type=float, default=0.99,
-                        help='Coverage threshold to end episode (default: 0.99)')
+    parser.add_argument('--threshold', type=float, default=0.97,
+                        help='Coverage threshold to end episode (default: 0.97)')
     parser.add_argument('--headless', action='store_true',
                         help='Skip Gazebo GUI client')
     parser.add_argument('--no-rviz', action='store_true',

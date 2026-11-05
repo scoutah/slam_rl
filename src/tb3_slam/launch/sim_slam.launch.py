@@ -362,7 +362,7 @@ def generate_launch_description():
     rviz = LaunchConfiguration('rviz', default='true')
     exploration_mode = LaunchConfiguration('exploration_mode', default='classic')
     episode_file = LaunchConfiguration('episode_file', default='/tmp/slam_episode_done')
-    coverage_threshold = LaunchConfiguration('coverage_threshold', default='0.99')
+    coverage_threshold = LaunchConfiguration('coverage_threshold', default='0.97')
     world_size = LaunchConfiguration('world_size', default=str(DEFAULT_WORLD_SIZE))
 
     ros_gz_sim = get_package_share_directory('ros_gz_sim')

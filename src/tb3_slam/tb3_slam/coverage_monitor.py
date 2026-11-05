@@ -13,7 +13,7 @@ import numpy as np
 
 from tb3_slam.utils import load_world_size, WORLD_META_FILE
 
-DEFAULT_COVERAGE_THRESHOLD: float = 0.99
+DEFAULT_COVERAGE_THRESHOLD: float = 0.97
 
 EPISODE_TIMEOUT_BY_WORLD_SIZE: dict[float, float] = {
     8.0: 600.0,

@@ -37,7 +37,7 @@ pkill -9 -f gz                                       # when Gazebo survives Ctrl
 python3 tools/check_world_connectivity.py            # offline generator check, both sizes
 ```
 
-`training_runner.py` (see `--help`): `--mode classic|rl`, `--episodes`, `--threshold` (0.99),
+`training_runner.py` (see `--help`): `--mode classic|rl`, `--episodes`, `--threshold` (0.97),
 `--headless`, `--no-rviz`, `--world PATH`, `--world-size 8|12` (not allowed with `--world`),
 `--randomize-worlds` (else ONE world is reused), `--save-worlds`. The episode timeout is **not**
 configurable: it is derived from world size (`coverage_monitor.timeout_for_world_size`, 600 s @8 m,

@@ -41,7 +41,10 @@ python3 tools/check_world_connectivity.py            # offline generator check, 
 `--headless`, `--no-rviz`, `--world PATH`, `--world-size 8|12` (not allowed with `--world`),
 `--randomize-worlds` (else ONE world is reused), `--save-worlds`. The episode timeout is **not**
 configurable: it is derived from world size (`coverage_monitor.timeout_for_world_size`, 600 s @8 m,
-900 s @12 m, #10). Results CSV has a `world_size` column.
+900 s @12 m, #10) and counts **sim time** (episode_manager uses the node clock; the stuck window and
+`elapsed_s` too). `--sim-speed N` (env `SLAM_SIM_SPEED`; 1 = real time, 0 = unlimited) sets Gazebo's
+real-time factor via a patched `/tmp/slam_world_speed.sdf` (`utils.apply_sim_speed`). Results CSV has
+`world_size`, `wall_s`, `sim_speed` columns; `elapsed_s` is sim seconds (read from `/tmp/slam_episode_done.sim_s`).
 
 ## Architecture
 

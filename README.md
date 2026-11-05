@@ -47,13 +47,22 @@ ros2 launch tb3_slam sim_slam.launch.py exploration_mode:=rl
 # Episodisches Training (siehe --help für alle Optionen)
 python3 training_runner.py --mode classic --episodes 20 --headless --world-size 12
 python3 training_runner.py --world worlds/<id>.sdf --episodes 5   # Welt wiederverwenden
+python3 training_runner.py --mode rl --episodes 50 --headless --sim-speed 4   # Gazebo bis zu 4x schneller
 
 # Offline-Check des Weltengenerators (nur numpy, kein ROS)
 python3 tools/check_world_connectivity.py
 ```
 
 Das Episoden-Timeout ist nicht konfigurierbar; es folgt der Weltgröße
-(600 s bei 8 × 8 m, 900 s bei 12 × 12 m).
+(600 s bei 8 × 8 m, 900 s bei 12 × 12 m) und zählt in **Simulationszeit**
+(ebenso Stuck-Fenster, Warm-up und `elapsed_s` im CSV).
+
+**Schnellere Simulation:** `--sim-speed N` (bzw. Env `SLAM_SIM_SPEED=N` bei `ros2 launch`)
+setzt den Ziel-Realtime-Faktor von Gazebo (Standard 1 = Echtzeit, 0 = unbegrenzt). Die
+erreichte Geschwindigkeit ist CPU-begrenzt und lässt sich mit `gz topic -e -t /stats`
+(`real_time_factor`) prüfen; wird die Sim zu schnell, verschlechtern sich Odometrie/Scans/
+Planung. Die Welt-Datei wird dabei nicht verändert (gepatchte Kopie unter
+`/tmp/slam_world_speed.sdf`).
 
 Simulation mit `Ctrl+C` beenden; überlebt Gazebo das, `pkill -9 -f gz`.
 
@@ -98,8 +107,8 @@ betreffenden Stelle im Code, nicht hier und nicht in langen Datei-Headern.
 | `tb3_slam/multi_robot_explorer.py` | Basis-Node + ROS-freie Typen (`Goal`, `RobotState`, `FrontierCandidate`). Besitzt alle ROS-I/O und Ziel-Überwachung; publiziert bei jedem `/map`-Update die Frontier-/Centroid-Marker auf `/frontiers_viz`. Speist seinen TF-Buffer direkt aus `/<ns>/tf[_static]` (plus globales `/tf_static` für `map→<ns>/map`), also unabhängig vom Viz-`tf_relay`. Dispatcht Ziele im robotereigenen `<ns>/map`-Frame (Nav2 kennt den gemergten `map`-Frame nicht). Subklassen überschreiben nur `select_goals(merged_map, [RobotState])`. |
 | `tb3_slam/information_gain.py` | Geteilte, verdeckungsbewusste Informationsgewinn-Schätzung für Frontier-Ziele (`visible_information`: Strahlen im Sensorradius, enden an bekannten Wänden; `InformationField`: Cache pro Karte, Anteil der Sensorfläche). Von klassischem und RL-Explorer genutzt. Keine ROS-Imports. |
 | `tb3_slam/path_cost.py` | ROS-freie Helfer für den Nav2-Pfadkosten-Cache (`cost_key`, `path_length`). |
-| `tb3_slam/coverage_monitor.py` | `timeout_for_world_size` (600 s @8 m, 900 s @12 m), Expected-Cells / Coverage. |
-| `tb3_slam/episode_manager.py` | Beobachtet die gemergte `/map`; beendet bei Coverage ≥ Schwelle, stuck (<0,5 %/90 s) oder Timeout; schreibt `/tmp/slam_episode_done` (löscht beim Start eine veraltete Datei; der Explorer bricht beim Erscheinen der Datei seine Ziele ab). |
+| `tb3_slam/coverage_monitor.py` | `timeout_for_world_size` (600 Sim-s @8 m, 900 Sim-s @12 m), Expected-Cells / Coverage. |
+| `tb3_slam/episode_manager.py` | Beobachtet die gemergte `/map`; beendet bei Coverage ≥ Schwelle, stuck (<0,5 %/90 s) oder Timeout (alle Zeiten in Simulationszeit); schreibt `/tmp/slam_episode_done` (löscht beim Start eine veraltete Datei) und spiegelt die Sim-Dauer jede Sekunde nach `/tmp/slam_episode_done.sim_s`; der Explorer bricht beim Erscheinen der Datei seine Ziele ab. |
 | `tb3_slam/cmd_vel_relay.py` | Nav2 `/<ns>/cmd_vel_smoothed` (Twist) → `/<ns>/cmd_vel` (TwistStamped, für die Jazzy-gz-Bridge). |
 | `tb3_slam/tf_relay.py` | Reine Visualisierungshilfe: spiegelt `/<ns>/tf` auf globales `/tf`, damit RViz das RobotModel zeigt. Nur mit RViz gestartet; der Explorer hängt nicht mehr davon ab. |
 | `tb3_slam/nav2_gate.py` | Kurzlebiger Prozess (`nav2_gate --ns <ns>`): blockiert auf `/<ns>/navigate_to_pose`, Exit 0 sobald Nav2 aktiv / Exit 1 bei Timeout. Launch startet beide Gates parallel; der Explorer startet, sobald das letzte Gate beendet ist (`OnProcessExit`-Countdown) — signalbasiert statt per festem Delay. |
@@ -128,11 +137,13 @@ betreffenden Stelle im Code, nicht hier und nicht in langen Datei-Headern.
 
 | Datei | Inhalt |
 |---|---|
-| `training_runner.py` | Episoden-Loop: Welt generieren/wiederverwenden, Sim starten, `/tmp/slam_episode_done` pollen, Prozessgruppe killen, CSV in `results/` schreiben. |
+| `training_runner.py` | Episoden-Loop: Welt generieren/wiederverwenden, Sim starten (`--sim-speed`), `/tmp/slam_episode_done` pollen, Prozessgruppe killen, CSV in `results/` schreiben (`elapsed_s` = Sim-Sekunden, dazu `wall_s`, `sim_speed`). |
 | `tools/check_world_connectivity.py` | Offline-Check (nur numpy): Freiraum-Konnektivität + Spawn-Erreichbarkeit für beide Studiengrößen. |
 
 ### Inter-Prozess-Dateien (`/tmp`)
 
 - `/tmp/slam_world_meta.json` — `expected_traversable_cells`, `spawns`, `world_size`; von `generate_random_world` geschrieben, von `coverage_monitor` gelesen. Beim Wiederverwenden einer Welt wird deren `<world>.meta.json`-Sidecar hierher kopiert.
 - `/tmp/slam_episode_done` — Episoden-Endgrund; von `episode_manager` geschrieben, von `training_runner.py` gepollt.
-- `results/<dd-mm-yyyy>-<mode>-<runid>.csv` — `;`-getrennt (Spalte `world_size`).
+- `/tmp/slam_episode_done.sim_s` — Sim-Sekunden seit Episodenstart; von `episode_manager` jede Sim-Sekunde (atomar) geschrieben, vom Runner für `elapsed_s` gelesen.
+- `/tmp/slam_world_speed.sdf` — Kopie der Welt mit angepasstem Physik-Timing, nur wenn `SLAM_SIM_SPEED` ≠ 1.
+- `results/<dd-mm-yyyy>-<mode>-<runid>.csv` — `;`-getrennt (Spalten `elapsed_s` [Sim-s], `world_size`, `wall_s`, `sim_speed`).

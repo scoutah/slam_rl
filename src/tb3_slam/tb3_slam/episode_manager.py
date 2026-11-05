@@ -1,6 +1,6 @@
 """Watch the merged map and signal episode end on coverage, stuck or timeout."""
+import os
 from pathlib import Path
-import time
 
 from nav_msgs.msg import OccupancyGrid
 import rclpy
@@ -14,6 +14,9 @@ from tb3_slam.coverage_monitor import (
 )
 
 
+SIM_ELAPSED_SUFFIX = '.sim_s'
+
+
 class EpisodeManager(Node):
     """
     Monitors map coverage and signals episode completion.
@@ -22,6 +25,11 @@ class EpisodeManager(Node):
     done-signal file once coverage exceeds the configured threshold (default
     97 %).  An outer process (training_runner.py) watches that file and
     restarts the simulation for the next episode.
+
+    All durations (grace, stuck window, timeout, elapsed) run on the node
+    clock, i.e. *simulation* time under ``use_sim_time``, so they mean the same
+    thing whatever real-time factor Gazebo achieves.  The current sim-time
+    elapsed is mirrored to ``<episode_file>.sim_s`` for the runner.
 
     Published topics:
       /episode/coverage  (std_msgs/Float32)  – current coverage [0, 1]
@@ -60,10 +68,11 @@ class EpisodeManager(Node):
             self._expected_cells = expected
             self.get_logger().info(f'Expected traversable cells: {self._expected_cells}')
 
-        self._start_time: float = time.time()
+        self.sim_elapsed_file: str = self.episode_file + SIM_ELAPSED_SUFFIX
+        self._start_time: float = self._now()
         self._done: bool = False
         self._last_coverage: float = 0.0
-        self._last_coverage_change_time: float = time.time()
+        self._last_coverage_change_time: float = self._now()
 
         # A file present at startup is always stale (this node is its sole
         # writer); leaving it makes explorers terminate instantly on the first
@@ -74,8 +83,11 @@ class EpisodeManager(Node):
 
         self.create_subscription(OccupancyGrid, '/map', self._map_callback, 10)
 
-        # Watchdog: check wall-clock timeout every 10 s
+        # Watchdog (sim-time timer): timeout check every 10 sim-s.
         self.create_timer(10.0, self._timeout_check)
+        # Keep the runner's sim-time elapsed fresh even if the explorer ends
+        # the episode (it writes the done file itself) before this node does.
+        self.create_timer(1.0, self._write_sim_elapsed)
 
         self.get_logger().info(
             f'EpisodeManager started – threshold={self.threshold:.0%}, '
@@ -92,7 +104,7 @@ class EpisodeManager(Node):
         if self._done:
             return
 
-        elapsed = time.time() - self._start_time
+        elapsed = self._elapsed()
         if elapsed < self.startup_grace_s:
             self.get_logger().info(
                 f'[warmup] ignoring /map ({self.startup_grace_s - elapsed:.0f}s left)',
@@ -113,11 +125,11 @@ class EpisodeManager(Node):
         # Stuck detection: abort if coverage stagnates
         if coverage - self._last_coverage >= self._stuck_min_delta:
             self._last_coverage = coverage
-            self._last_coverage_change_time = time.time()
+            self._last_coverage_change_time = self._now()
         else:
-            stall_duration = time.time() - self._last_coverage_change_time
+            stall_duration = self._now() - self._last_coverage_change_time
             if stall_duration >= self._stuck_timeout:
-                elapsed = time.time() - self._start_time
+                elapsed = self._elapsed()
                 self._signal_done(
                     reason=f'stuck (coverage={coverage:.1%})',
                     elapsed=elapsed,
@@ -125,19 +137,33 @@ class EpisodeManager(Node):
                 return
 
         if coverage >= self.threshold:
-            elapsed = time.time() - self._start_time
+            elapsed = self._elapsed()
             self._signal_done(reason=f'coverage={coverage:.1%}', elapsed=elapsed)
 
     def _timeout_check(self) -> None:
         if self._done:
             return
-        elapsed = time.time() - self._start_time
+        elapsed = self._elapsed()
         if elapsed >= self.max_duration:
             self._signal_done(reason='timeout', elapsed=elapsed)
 
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    def _now(self) -> float:
+        """Node-clock time in seconds (sim time under ``use_sim_time``)."""
+        return self.get_clock().now().nanoseconds * 1e-9
+
+    def _elapsed(self) -> float:
+        """Seconds of node-clock time since this node started."""
+        return self._now() - self._start_time
+
+    def _write_sim_elapsed(self) -> None:
+        """Atomically publish the sim-time elapsed for training_runner.py."""
+        tmp = self.sim_elapsed_file + '.tmp'
+        Path(tmp).write_text(f'{self._elapsed():.3f}')
+        os.replace(tmp, self.sim_elapsed_file)
 
     def _clear_stale_episode_file(self) -> None:
         stale = Path(self.episode_file)
@@ -146,12 +172,14 @@ class EpisodeManager(Node):
             self.get_logger().info(
                 f'Removed stale episode file {self.episode_file}'
             )
+        Path(self.sim_elapsed_file).unlink(missing_ok=True)
 
     def _signal_done(self, *, reason: str, elapsed: float) -> None:
         self._done = True
         self.get_logger().info(
             f'Episode done – reason={reason}, elapsed={elapsed:.1f}s'
         )
+        self._write_sim_elapsed()
         Path(self.episode_file).write_text(reason)
 
 

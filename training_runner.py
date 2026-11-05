@@ -28,6 +28,8 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 
 EPISODE_FILE = Path('/tmp/slam_episode_done')
+# episode_manager mirrors its sim-time elapsed here (see EpisodeManager docstring).
+SIM_ELAPSED_FILE = Path(str(EPISODE_FILE) + '.sim_s')
 SHUTDOWN_GRACE = 15      # seconds to wait for ros2 launch to exit cleanly
 INTER_EPISODE_PAUSE = 3  # seconds to wait after shutdown before next launch
 
@@ -154,6 +156,14 @@ def make_result_path(mode: str, run_id: str) -> Path:
     return RESULTS_DIR / f'{date_str}-{mode}-{run_id}.csv'
 
 
+def read_sim_elapsed(path: Path = SIM_ELAPSED_FILE) -> float | None:
+    """Sim-time seconds of the finished episode, or None if not (yet) written."""
+    try:
+        return float(path.read_text())
+    except (OSError, ValueError):
+        return None
+
+
 def append_result(
     result_file: Path,
     episode: int,
@@ -161,8 +171,14 @@ def append_result(
     reason: str,
     elapsed: float,
     world_file: Path | None = None,
+    wall_s: float | None = None,
+    sim_speed: float = 1.0,
 ) -> None:
-    """Append one episode result row to the CSV result file."""
+    """Append one episode result row to the CSV result file.
+
+    ``elapsed`` is the episode duration in *simulation* seconds (the wall-clock
+    value if the sim-time one was unavailable); ``wall_s`` is the real duration.
+    """
     try:
         coverage = _parse_coverage(reason)
         world_size = read_world_size(world_file) if world_file is not None else None
@@ -172,7 +188,8 @@ def append_result(
             writer = csv.writer(f, delimiter=';')
             if write_header:
                 writer.writerow(['timestamp', 'episode', 'mode', 'reason',
-                                 'elapsed_s', 'coverage', 'world', 'world_size'])
+                                 'elapsed_s', 'coverage', 'world', 'world_size',
+                                 'wall_s', 'sim_speed'])
             writer.writerow([
                 datetime.now().isoformat(timespec='seconds'),
                 episode,
@@ -182,6 +199,8 @@ def append_result(
                 f'{coverage:.4f}' if coverage is not None else '',
                 world_file.name if world_file is not None else '',
                 world_size if world_size is not None else '',
+                f'{wall_s:.1f}' if wall_s is not None else '',
+                f'{sim_speed:g}',
             ])
     except Exception as exc:
         print(f'[runner] ERROR writing result to {result_file}: {exc}', file=sys.stderr)
@@ -304,10 +323,12 @@ def run(
     save_worlds: bool = False,
     world_size: float | None = None,
     rviz: bool = True,
+    sim_speed: float = 1.0,
 ) -> None:
     print(f'[runner] Starting episodic training: mode={mode}, episodes={n_episodes}')
     print(f'         threshold={threshold:.0%}, timeout=auto (world size), '
-          f'headless={headless}')
+          f'headless={headless}, sim speed={sim_speed:g}x'
+          + (' (unlimited)' if sim_speed == 0 else ''))
     print(f'         world    → {world_file}' + (' (new each episode)' if randomize_worlds else ''))
     print(f'         world size: {read_world_size(world_file) or "unknown"} m')
     print(f'         results  → {result_file}')
@@ -333,10 +354,12 @@ def run(
             print(f'[runner] New world: {world_file}')
 
         EPISODE_FILE.unlink(missing_ok=True)
+        SIM_ELAPSED_FILE.unlink(missing_ok=True)
 
         # Pass world file to launch via environment variable
         env = os.environ.copy()
         env['SLAM_WORLD_FILE'] = str(world_file)
+        env['SLAM_SIM_SPEED'] = f'{sim_speed:g}'
 
         launch_cmd = build_launch_cmd(mode, EPISODE_FILE, threshold, headless, rviz)
         print(f'[runner] Launching: {" ".join(launch_cmd)}')
@@ -352,13 +375,22 @@ def run(
         start_filtered_readers(proc)
 
         reason = wait_for_episode_done(EPISODE_FILE, proc)
-        elapsed = time.time() - ep_start
+        wall_s = time.time() - ep_start
+        # Durations are reported in sim seconds so results do not depend on the
+        # achieved real-time factor; fall back to wall time if unavailable.
+        sim_s = read_sim_elapsed()
+        if sim_s is None:
+            print('[runner] WARNING: no sim-time elapsed available, using wall time',
+                  file=sys.stderr)
+        elapsed = sim_s if sim_s is not None else wall_s
 
-        print(f'[runner] Episode {episode} finished – reason="{reason}", elapsed={elapsed:.1f}s')
+        print(f'[runner] Episode {episode} finished – reason="{reason}", '
+              f'elapsed={elapsed:.1f}s sim, {wall_s:.1f}s wall')
         stats.append({'episode': episode, 'reason': reason, 'elapsed': elapsed})
 
         kill_launch(proc)
-        append_result(result_file, episode, mode, reason, elapsed, world_file)
+        append_result(result_file, episode, mode, reason, elapsed, world_file,
+                      wall_s=wall_s, sim_speed=sim_speed)
         print(f'[runner] Result appended to {result_file}')
         print(f'[runner] Simulation stopped. Waiting {INTER_EPISODE_PAUSE}s …')
         time.sleep(INTER_EPISODE_PAUSE)
@@ -367,7 +399,7 @@ def run(
     print('\n[runner] ══════════════════════════ Training complete ══════════════════════════')
     print(f'  Episodes  : {len(stats)}')
     avg_time = sum(s['elapsed'] for s in stats) / len(stats)
-    print(f'  Avg time  : {avg_time:.1f}s')
+    print(f'  Avg time  : {avg_time:.1f}s (sim time)')
     timeouts = sum(1 for s in stats if 'timeout' in s['reason'])
     print(f'  Timeouts  : {timeouts}/{len(stats)}')
     stuck = sum(1 for s in stats if 'stuck' in s['reason'])
@@ -402,7 +434,13 @@ def main() -> None:
                         help='Generate a new random world for each episode')
     parser.add_argument('--save-worlds', action='store_true',
                         help='Persist generated worlds to worlds/ (default: /tmp/)')
+    parser.add_argument('--sim-speed', type=float, default=1.0,
+                        help='Target Gazebo real-time factor: 1 = real time (default), '
+                             '4 = up to 4x faster, 0 = unlimited. The achieved speed is '
+                             'CPU-bound; measure it with `gz topic -e -t /stats`.')
     args = parser.parse_args()
+    if args.sim_speed < 0:
+        parser.error('--sim-speed must be >= 0')
     if args.world and args.world_size is not None and not args.randomize_worlds:
         parser.error('--world-size has no effect with --world (size is baked into the SDF)')
     if args.world_size is not None:
@@ -430,6 +468,7 @@ def main() -> None:
             save_worlds=args.save_worlds,
             world_size=args.world_size,
             rviz=not args.no_rviz,
+            sim_speed=args.sim_speed,
         )
     except KeyboardInterrupt:
         print('\n[runner] Interrupted by user.')

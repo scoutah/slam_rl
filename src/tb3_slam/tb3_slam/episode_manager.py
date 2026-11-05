@@ -20,7 +20,7 @@ class EpisodeManager(Node):
 
     Subscribes to /map, computes the fraction of known cells, and writes a
     done-signal file once coverage exceeds the configured threshold (default
-    95 %).  An outer process (training_runner.py) watches that file and
+    97 %).  An outer process (training_runner.py) watches that file and
     restarts the simulation for the next episode.
 
     Published topics:
@@ -30,7 +30,7 @@ class EpisodeManager(Node):
     def __init__(self) -> None:
         super().__init__('episode_manager')
 
-        self.declare_parameter('coverage_threshold', 0.99)
+        self.declare_parameter('coverage_threshold', 0.97)
         self.declare_parameter('episode_file', '/tmp/slam_episode_done')
         # Ignore /map messages for this many seconds after launch. A previous
         # episode's cartographer that survives SIGINT keeps publishing the old

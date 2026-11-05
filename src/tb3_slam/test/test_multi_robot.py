@@ -280,3 +280,24 @@ def test_nav2_idempotent():
 
 def test_merged_map_frame_is_not_a_robot_frame():
     assert all(frame(ns, 'map') != MERGED_MAP_FRAME for ns in ROBOT_NAMESPACES)
+
+
+def test_nav2_merged_frame_moves_global_planning_to_merged_map():
+    out = namespace_nav2_params(NAV2_SNIPPET, 'r1', MERGED_MAP_FRAME)
+    costmap = out['global_costmap']['global_costmap']['ros__parameters']
+
+    assert costmap['global_frame'] == MERGED_MAP_FRAME
+    assert costmap['static_layer']['map_topic'] == f'/{MERGED_MAP_FRAME}'
+    assert out['bt_navigator']['ros__parameters']['global_frame'] == MERGED_MAP_FRAME
+    # Local costmap, robot frames and sensor topics stay per robot.
+    assert out['local_costmap']['local_costmap']['ros__parameters']['global_frame'] == 'r1/odom'
+    assert costmap['robot_base_frame'] == 'r1/base_link'
+    assert costmap['obstacle_layer']['scan']['topic'] == '/r1/scan'
+
+
+def test_nav2_merged_frame_idempotent_and_input_not_mutated():
+    original = copy.deepcopy(NAV2_SNIPPET)
+    once = namespace_nav2_params(NAV2_SNIPPET, 'r1', MERGED_MAP_FRAME)
+
+    assert namespace_nav2_params(once, 'r1', MERGED_MAP_FRAME) == once
+    assert NAV2_SNIPPET == original

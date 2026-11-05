@@ -100,7 +100,7 @@ uncertain / `75–100` wall / `-1` unknown. A **frontier = FREE cell with an UNC
 neighbour** and no wall within a 5×5 window (intentionally *not* "next to −1" — Cartographer's
 probability map); found by BFS over free cells. Groups are 8-connected; the goal per group is the
 FREE cell nearest to the group mean; if it is not footprint-safe/reachable (`GOAL_CLEARANCE_M` 0.22 m),
-it is pushed back along the robot's FREE-cell path to the last reachable cell (no path → no goal),
+it is first "popped outward" `GOAL_CLEARANCE_M` away from the frontier line (along its free-side normal); if that cell is not safe/reachable (tight space) the goal is the first reachable cell on the robot's shortest FREE-cell path (8-connected Dijkstra with a wall-proximity penalty mimicking Nav2's inflation — not a wall-hugging BFS tree) from the target (no path → no goal),
 ≥ `MIN_GOAL_GRID_DIST` (15 cells) from the robot. `grid_to_world` uses a
 **0.4999** offset on purpose (Nav2 rounding) — don't "fix" to 0.5.
 

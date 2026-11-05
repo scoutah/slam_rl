@@ -12,17 +12,24 @@ class Bid:
     path_length: float
     information: frozenset[tuple[int, int]]
     frontier: frozenset[tuple[int, int]]
+    # Metres by which the teammate is closer to this target than the bidder
+    # (straight line, 0 if the bidder is closer). Stops robots from crossing the
+    # map into the teammate's area.
+    rival_gap: float = 0.0
 
 
 def greedy_assignment(
     bids: list[Bid], resolution: float, radius: float, *,
-    alpha: float = 1.0, beta: float = 0.2,
+    alpha: float = 1.0, beta: float = 0.2, gamma: float = 0.3,
     reserved_information: frozenset = frozenset(),
     reserved_frontiers: frozenset = frozenset(),
 ) -> list[Bid]:
     """Choose the best pair, subtract its information, then repeat for the team.
 
-    Score = alpha * marginal area / sensor-disc area - beta * path / radius.
+    Score = alpha * marginal area / sensor-disc area - beta * path / radius
+    - gamma * rival_gap / radius. The last term makes a frontier the teammate
+    is closer to less attractive, so a robot that has finished its own area
+    prefers leftovers near itself over a trip across the map.
     Select useful targets even at negative scores: otherwise the last distant
     frontier could be abandoned. Zero marginal information is never assigned.
     Greedy permits recomputing coupled gains after each choice; it is not a
@@ -30,6 +37,8 @@ def greedy_assignment(
     """
     if any(not math.isfinite(v) or v <= 0 for v in (resolution, radius, alpha, beta)):
         raise ValueError('resolution, radius and utility weights must be finite and positive')
+    if not math.isfinite(gamma) or gamma < 0:
+        raise ValueError('rival weight gamma must be finite and non-negative')
     covered = set(reserved_information)
     claimed = set(reserved_frontiers)
     robots, targets = set(), set()
@@ -47,7 +56,8 @@ def greedy_assignment(
 
         def rank(bid):
             gain = len(bid.information - covered) * resolution ** 2 / (math.pi * radius ** 2)
-            score = alpha * gain - beta * bid.path_length / radius
+            score = (alpha * gain - beta * bid.path_length / radius
+                     - gamma * bid.rival_gap / radius)
             return -score, bid.path_length, bid.robot, bid.cell
 
         chosen = min(eligible, key=rank)

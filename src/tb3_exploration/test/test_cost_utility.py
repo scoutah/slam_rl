@@ -75,3 +75,17 @@ def test_ties_are_deterministic_and_grid_extent_does_not_enter_the_score():
     larger = np.pad(grid, ((0, 40), (0, 40)), constant_values=-1)
     assert (visible_information(grid, (40, 40), 0.1, 1.0)
             == visible_information(larger, (40, 40), 0.1, 1.0))
+
+
+def test_rival_gap_prefers_target_in_own_area_over_teammates_area():
+    # Equal information and path; the second target is closer to the teammate.
+    own = _bid('r1', (1, 1), 4.0, range(50))
+    rival_area = Bid('r1', (2, 2), 4.0, frozenset(range(50, 100)), frozenset([(2, 2)]),
+                     rival_gap=5.0)
+    assert greedy_assignment([rival_area, own], 0.1, 3.5) == [own]
+    assert greedy_assignment([rival_area, own], 0.1, 3.5, gamma=0.0)[0] in (own, rival_area)
+
+
+def test_rival_gap_still_assigns_when_nothing_else_is_left():
+    only = Bid('r1', (2, 2), 4.0, frozenset(range(50)), frozenset([(2, 2)]), rival_gap=9.0)
+    assert greedy_assignment([only], 0.1, 3.5) == [only]

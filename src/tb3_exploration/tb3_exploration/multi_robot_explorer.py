@@ -32,10 +32,13 @@ class ClassicExplorer(MultiRobotExplorerNode):
         self._sensor_radius = self.declare_parameter('sensor_radius', 3.5).value
         self._alpha = self.declare_parameter('utility_alpha', 1.0).value
         self._beta = self.declare_parameter('utility_beta', 0.2).value
+        self._gamma = self.declare_parameter('utility_gamma', 0.3).value
         self._ranking_timeout = self.declare_parameter('ranking_timeout', 8.0).value
         if any(not math.isfinite(v) or v <= 0 for v in (
                 self._sensor_radius, self._alpha, self._beta, self._ranking_timeout)):
             raise ValueError('sensor radius, utility weights and ranking timeout must be positive')
+        if not math.isfinite(self._gamma) or self._gamma < 0:
+            raise ValueError('utility_gamma must be finite and non-negative')
         self._round = None
         self._round_generation = 0
         self._pending_plans = {}
@@ -191,6 +194,14 @@ class ClassicExplorer(MultiRobotExplorerNode):
                     if frontier_cell is not None:
                         reserved.add(frontier_cell)
 
+        # Where each teammate will be: its active goal, else its current position.
+        anchors = {}
+        for ns, io in self._robots.items():
+            if io.goal_active and io.current_goal is not None:
+                anchors[ns] = (io.current_goal.x, io.current_goal.y)
+            else:
+                anchors[ns] = self._robot_pos(io)
+
         reachable, poses, bids, targets = {}, {}, [], {}
         for ns, candidate, length in self._confirmed:
             io = self._robots[ns]
@@ -210,11 +221,16 @@ class ClassicExplorer(MultiRobotExplorerNode):
                 mapped for old_cell in candidate.frontier_cells
                 if (mapped := world_to_grid(*grid_to_world(old_cell, self._round_map), msg))
                 is not None)
-            bids.append(Bid(ns, cell, length, visible(cell), frontier))
+            rivals = [math.hypot(candidate.x - a[0], candidate.y - a[1])
+                      for other, a in anchors.items() if other != ns and a is not None]
+            own = math.hypot(candidate.x - pos[0], candidate.y - pos[1])
+            rival_gap = max(0.0, own - min(rivals)) if rivals else 0.0
+            bids.append(Bid(ns, cell, length, visible(cell), frontier, rival_gap))
             targets[ns, cell] = candidate
 
         chosen = greedy_assignment(
             bids, resolution, self._sensor_radius, alpha=self._alpha, beta=self._beta,
+            gamma=self._gamma,
             reserved_information=frozenset(covered), reserved_frontiers=frozenset(reserved))
         for bid in chosen:
             candidate = targets[bid.robot, bid.cell]

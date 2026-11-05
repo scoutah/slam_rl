@@ -420,8 +420,9 @@ def find_centroid(
        reachable. Nearest-by-distance would be wrong here, because it can lie
        on the far side of a wall.
 
-    Returns ``None`` if the target cannot be reached over FREE cells at all, or
-    if the goal would be closer than ``MIN_GOAL_GRID_DIST`` to the robot. The
+    Returns ``None`` if the target cannot be reached over FREE cells at all. A
+    goal closer than ``MIN_GOAL_GRID_DIST`` to the robot is replaced by a
+    viewpoint on the frontier (``_viewpoint_goal``), or ``None`` if none. The
     pipeline passes ``reachable_cells`` and ``parents`` once per map; direct
     calls compute them with five cells of clearance (0.25 m at 0.05 m).
     """
@@ -448,8 +449,42 @@ def find_centroid(
     if cell is None:
         return None
     if math.dist(cell, robot_grid_pos) < MIN_GOAL_GRID_DIST:
-        return None
+        return _viewpoint_goal(cell, grid, reachable_cells, robot_grid_pos)
     return cell
+
+
+# A frontier next to the robot cannot be a goal (Nav2 would "succeed" without
+# moving), but dropping it leaves the robot with only far frontiers and it
+# crosses the map. Instead it gets a viewpoint at least MIN_GOAL_GRID_DIST away.
+VIEWPOINT_MAX_CELLS = 40   # 2 m at 0.05 m
+
+
+def _viewpoint_goal(
+    target: tuple[int, int],
+    grid: np.ndarray,
+    reachable_cells: np.ndarray,
+    robot_grid_pos: tuple[int, int],
+) -> tuple[int, int] | None:
+    """Reachable cell >= ``MIN_GOAL_GRID_DIST`` from the robot, as near as possible to ``target``.
+
+    The cell must be within ``VIEWPOINT_MAX_CELLS`` of the target and have a
+    wall-free straight line to it, so it looks at the frontier from the same
+    side instead of lying behind a wall. Returns ``None`` if there is none.
+    """
+    cells = np.argwhere(reachable_cells)
+    if len(cells) == 0:
+        return None
+    to_robot = np.hypot(cells[:, 0] - robot_grid_pos[0], cells[:, 1] - robot_grid_pos[1])
+    to_target = np.hypot(cells[:, 0] - target[0], cells[:, 1] - target[1])
+    ok = (to_robot >= MIN_GOAL_GRID_DIST) & (to_target <= VIEWPOINT_MAX_CELLS)
+    for i in np.flatnonzero(ok)[np.argsort(to_target[ok])]:
+        r, c = int(cells[i][0]), int(cells[i][1])
+        steps = max(abs(target[0] - r), abs(target[1] - c), 1)
+        rr = np.rint(np.linspace(r, target[0], steps + 1)).astype(int)
+        cc = np.rint(np.linspace(c, target[1], steps + 1)).astype(int)
+        if not (grid[rr, cc] >= WALL_MIN).any():
+            return r, c
+    return None
 
 
 def centroids_from_map(

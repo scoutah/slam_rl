@@ -93,8 +93,9 @@ other as walls, so `map_merger` frees each robot's current 0.22 m footprint disc
 uncertain / `75–100` wall / `-1` unknown. A **frontier = FREE cell with an UNCERTAIN cardinal
 neighbour** and no wall within a 5×5 window (intentionally *not* "next to −1" — Cartographer's
 probability map); found by BFS over free cells. Groups are 8-connected; the goal per group is the
-nearest footprint-safe, cardinal-connected FREE cell to the centroid, ≥ `MIN_GOAL_GRID_DIST`
-(15 cells) from the robot, with `GOAL_CLEARANCE_M` (0.22 m) clearance. `grid_to_world` uses a
+FREE cell nearest to the group mean; if it is not footprint-safe/reachable (`GOAL_CLEARANCE_M` 0.22 m),
+it is pushed back along the robot's FREE-cell path to the last reachable cell (no path → no goal),
+≥ `MIN_GOAL_GRID_DIST` (15 cells) from the robot. `grid_to_world` uses a
 **0.4999** offset on purpose (Nav2 rounding) — don't "fix" to 0.5.
 
 **Explorer base + methods**: common ROS I/O lives in `tb3_slam/multi_robot_explorer.py::MultiRobotExplorerNode`;

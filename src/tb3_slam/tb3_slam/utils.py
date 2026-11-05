@@ -3,6 +3,7 @@ import json
 import os
 from pathlib import Path
 import random
+import re
 from typing import List, Tuple
 
 WORLD_META_FILE = Path('/tmp/slam_world_meta.json')
@@ -472,3 +473,64 @@ def generate_random_world(
 
     except Exception:
         return False, 0
+
+
+# ---------------------------------------------------------------------------
+# Simulation speed (faster-than-real-time Gazebo)
+# ---------------------------------------------------------------------------
+
+SIM_STEP_BASE: float = 0.001  # physics step at real-time speed (s)
+# Largest step used when speeding up. 4 ms keeps the 200 Hz IMU and the 5 Hz
+# lidar of the burger model fully sampled and is stable for a differential drive.
+SIM_STEP_MAX: float = 0.004
+SIM_SPEED_ENV = 'SLAM_SIM_SPEED'
+_SPEED_SDF_TAGS = ('real_time_update_rate', 'max_step_size', 'real_time_factor')
+
+
+def physics_for_speed(speed: float) -> tuple[float, float, float]:
+    """Return ``(max_step_size, real_time_update_rate, real_time_factor)`` for a speed.
+
+    ``speed`` is the *target* real-time factor (sim seconds per wall second);
+    1 = real time, 0 = as fast as the CPU allows. gz-sim paces itself from
+    ``real_time_factor`` (``real_time_update_rate`` is kept consistent only for
+    readers of the SDF). The step grows with the speed up to ``SIM_STEP_MAX``
+    so the physics does not need >1 kHz of steps per wall second.
+    """
+    if speed < 0:
+        raise ValueError(f'sim speed must be >= 0 (0 = unlimited), got {speed}')
+    step = min(SIM_STEP_BASE * max(speed, 1.0), SIM_STEP_MAX)
+    if speed == 0:
+        return SIM_STEP_MAX, 0.0, 0.0
+    return step, speed / step, speed
+
+
+def apply_sim_speed(sdf_text: str, speed: float) -> str:
+    """Rewrite the ``<physics>`` timing tags of a world SDF for ``speed``."""
+    step, rate, rtf = physics_for_speed(speed)
+    values = {'max_step_size': step, 'real_time_update_rate': rate,
+              'real_time_factor': rtf}
+    for tag in _SPEED_SDF_TAGS:
+        pattern = re.compile(rf'(<{tag}>)[^<]*(</{tag}>)')
+        if not pattern.search(sdf_text):
+            raise ValueError(f'world SDF has no <{tag}> element to adjust')
+        sdf_text = pattern.sub(lambda m: f'{m.group(1)}{values[tag]:g}{m.group(2)}',
+                               sdf_text, count=1)
+    return sdf_text
+
+
+def sim_speed_from_env() -> float:
+    """Sim speed requested through ``SLAM_SIM_SPEED`` (default 1 = real time)."""
+    raw = os.environ.get(SIM_SPEED_ENV, '').strip()
+    return float(raw) if raw else 1.0
+
+
+def speed_up_world(world_file: str, speed: float,
+                   out_file: str = '/tmp/slam_world_speed.sdf') -> str:
+    """Return the world to load for ``speed``: the original at 1x, else a patched copy.
+
+    The source world (possibly a saved one under ``worlds/``) is never modified.
+    """
+    if speed == 1.0:
+        return world_file
+    Path(out_file).write_text(apply_sim_speed(Path(world_file).read_text(), speed))
+    return out_file

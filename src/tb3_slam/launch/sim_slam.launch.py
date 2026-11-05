@@ -38,6 +38,8 @@ from tb3_slam.utils import (
     generate_random_world,
     load_spawns,
     load_world_size,
+    sim_speed_from_env,
+    speed_up_world,
     WORLD_META_FILE,
     world_meta_path,
 )
@@ -99,6 +101,9 @@ def prepare_world(world_size: float) -> tuple[str, list[tuple[float, float]]]:
     # The generator writes both robot spawns (side by side at the room edge,
     # scale with world size) into the world metadata; load_spawns falls back
     # to the default geometry if a pre-made world has no fresh metadata.
+    # SLAM_SIM_SPEED (target real-time factor, 0 = unlimited) patches only the
+    # physics timing into a /tmp copy; the metadata above is unaffected.
+    world_file = speed_up_world(world_file, sim_speed_from_env())
     return world_file, load_spawns(WORLD_META_FILE)
 
 
@@ -217,11 +222,13 @@ def robot_stack(ns: str, spawn: tuple[float, float], configs: dict[str, str],
         output='log',
     )
 
-    # Publishes TwistStamped for 12.5 s (125 msgs @10 Hz, 0.5 rad/s ≈ one turn)
-    # so Cartographer can map free cells before the explorer looks for frontiers.
+    # Publishes TwistStamped for 12.5 sim-seconds (125 msgs @10 Hz, 0.5 rad/s ≈
+    # one turn) so Cartographer can map free cells before the explorer looks for
+    # frontiers. --use-sim-time keeps it one turn regardless of the sim speed.
     startup_spin = ExecuteProcess(
         cmd=[
             'ros2', 'topic', 'pub',
+            '--use-sim-time',
             '--rate', '10',
             '--times', '125',
             topic(ns, 'cmd_vel'),
@@ -311,6 +318,8 @@ def map_merge_stack(spawns: list[tuple[float, float]], world_size: float,
             'world_size': float(world_size),
         }],
     )
+    # The same offsets also go onto each robot's own /<ns>/tf_static so Nav2's
+    # global costmap (frame ``map``) can resolve map -> <ns>/map.
     static_tfs = [
         Node(
             package='tf2_ros',
@@ -318,28 +327,26 @@ def map_merge_stack(spawns: list[tuple[float, float]], world_size: float,
             name=f'static_tf_{ns}_map{suffix}',
             arguments=[
                 '--x', str(x), '--y', str(y), '--z', '0',
-    # The same offsets also go onto each robot's own /<ns>/tf_static so Nav2's
-    # global costmap (frame ``map``) can resolve map -> <ns>/map.
                 '--yaw', '0', '--pitch', '0', '--roll', '0',
                 '--frame-id', MERGED_MAP_FRAME,
                 '--child-frame-id', frame(ns, 'map'),
             ],
             parameters=[{'use_sim_time': use_sim_time}],
+            remappings=remap,
             output='log',
         )
         for ns, (x, y) in zip(ROBOT_NAMESPACES, spawns)
-    ]
-    return [*static_tfs, merge]
-
-
-            remappings=remap,
-def explorer_node(mode, use_sim_time, coverage_threshold, episode_file) -> Node:
-    """Standalone explorer node for the selected method.
-
         for suffix, remap in (
             ('', []),
             ('_robot_tree', [('/tf_static', topic(ns, 'tf_static'))]),
         )
+    ]
+    return [*static_tfs, merge]
+
+
+def explorer_node(mode, use_sim_time, coverage_threshold, episode_file) -> Node:
+    """Standalone explorer node for the selected method.
+
     ``classic`` runs the cost-utility explorer in ``tb3_exploration``; ``rl``
     runs the learned explorer in ``tb3_reinforced_exploration``. Each is its own
     node reading the merged global ``/map`` and dispatching goals to the

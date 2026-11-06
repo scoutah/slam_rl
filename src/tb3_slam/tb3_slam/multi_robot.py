@@ -152,6 +152,24 @@ def use_merged_map_for_global_planning(params: dict, merged_frame: str) -> None:
     params['bt_navigator']['ros__parameters']['global_frame'] = merged_frame
 
 
+# Generated doors are only MIN_PATH_WIDTH (1.1 m) wide, i.e. 0.55 m from the door
+# centre to either side. Upstream inflates 0.55 m, which turns the whole door
+# into a high-cost ridge: MPPI then prefers standing still to crossing it and
+# the robot never leaves its room. 0.30 m leaves the door centre cost-free.
+NAV2_INFLATION_RADIUS_M = 0.30
+NAV2_COST_SCALING_FACTOR = 5.0
+
+
+def relax_costmap_inflation(params: dict) -> None:
+    """Shrink the inflation of local and global costmap in place (see constants above)."""
+    for name in ('local_costmap', 'global_costmap'):
+        costmap = params.get(name, {}).get(name, {}).get('ros__parameters', {})
+        layer = costmap.get('inflation_layer')
+        if isinstance(layer, dict):
+            layer['inflation_radius'] = NAV2_INFLATION_RADIUS_M
+            layer['cost_scaling_factor'] = NAV2_COST_SCALING_FACTOR
+
+
 def namespace_nav2_params(params: dict, ns: str, merged_frame: str | None = None) -> dict:
     """Return a copy of parsed nav2 params with frames and absolute topics under ``ns``.
 
@@ -160,11 +178,13 @@ def namespace_nav2_params(params: dict, ns: str, merged_frame: str | None = None
     starting with ``/``) become ``/<ns>/...``. Relative topics stay unchanged.
     With ``merged_frame`` the global costmap and ``bt_navigator`` plan on the
     merged map instead (see ``use_merged_map_for_global_planning``), so a robot
-    can navigate into areas only its teammate has mapped. The input is not
+    can navigate into areas only its teammate has mapped. Costmap inflation is
+    relaxed so 1.1 m doors stay passable (``relax_costmap_inflation``). The input is not
     mutated, and applying the function twice gives the same result as once.
     """
     rewritten = copy.deepcopy(params)
     _namespace_nav2_node(rewritten, ns)
+    relax_costmap_inflation(rewritten)
     if merged_frame is not None:
         use_merged_map_for_global_planning(rewritten, merged_frame)
     return rewritten

@@ -180,7 +180,10 @@ class EpisodeManager(Node):
             f'Episode done – reason={reason}, elapsed={elapsed:.1f}s'
         )
         self._write_sim_elapsed()
-        Path(self.episode_file).write_text(reason)
+        # The explorer may have ended the episode first (e.g. "exhausted"); keep
+        # its more specific reason.
+        if not Path(self.episode_file).exists():
+            Path(self.episode_file).write_text(reason)
 
 
 def main(args=None) -> None:

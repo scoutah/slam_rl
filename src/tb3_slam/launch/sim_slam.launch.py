@@ -54,16 +54,15 @@ CARTOGRAPHER_LUA = 'turtlebot3_lds_2d.lua'
 
 # Each robot runs spawn→bridge→RSP→Cartographer→startup-spin in parallel; Nav2 is
 # then brought up per robot via nav2_slim.launch.py (only the 5 nodes the explorer
-# uses — see that file). The two Nav2 bringups run near-parallel but with a small
-# per-robot configure offset (NAV2_BASE_DELAY + i*NAV2_CONFIGURE_OFFSET) so their
-# lifecycle change_state phases never overlap — that overlap was the sole cause of
-# r2's intermittent change_state stall. One nav2_gate process per robot blocks on
+# uses — see that file). The Nav2 bringups run one after another (r2's starts when
+# r1's nav2_gate exits) so lifecycle change_state calls never overlap — that
+# overlap made r2's bringup hang. One nav2_gate process per robot blocks on
 # that robot's navigate_to_pose; the explorer launches (OnProcessExit countdown)
 # the instant the last gate exits, i.e. when both stacks are active — no fixed
 # explorer delay.
 #
 # Pre-Nav2 nodes use short fixed timers (no lifecycle race): RSP at 2 s,
-# Cartographer at 5 s, startup spin at 6 s; r1 Nav2 at 6 s, r2 at 10 s.
+# Cartographer at 5 s, startup spin at 6 s; r1 Nav2 at 6 s, r2 once r1 is active.
 GATE_TIMEOUT_S = 120.0  # nav2_gate gives up (exit 1) if Nav2 never comes up
 
 
@@ -421,28 +420,29 @@ def generate_launch_description():
             pre_nav2_actions += pre
             nav2_by_ns[ns] = nav2
 
-        # Nav2 bringups run (almost) in parallel for speed, but their lifecycle
-        # *configure* phases are decoupled by a small per-robot offset so they
-        # never issue change_state concurrently — that overlap was the only
-        # cause of r2's intermittent change_state stall, and it is just the
-        # first few seconds of each bringup, not the whole thing. Waiting for
-        # r1 to be fully active (the earlier serial design) needlessly delayed
-        # r2 by ~25 s; a small offset removes the race at near-zero cost.
+        # Nav2 bringups run strictly one after another: r1's starts on a timer,
+        # every further robot's when the previous robot's nav2_gate exits, i.e.
+        # once that Nav2 is fully active. Concurrent lifecycle change_state calls
+        # make a service response get lost and the later robot's bringup hangs
+        # forever (seen with r2 stuck in "Configuring planner_server"). A fixed
+        # stagger was not enough: under load r1's activation slid into r2's
+        # configure phase. The cost is r2's Nav2 coming up after r1's.
         #
-        # The explorer still starts on a real readiness signal: one nav2_gate
-        # per robot blocks on that robot's navigate_to_pose, and the explorer
+        # The explorer starts on a real readiness signal: one nav2_gate per
+        # robot blocks on that robot's navigate_to_pose, and the explorer
         # launches once *both* gates have exited (whichever finishes last).
         NAV2_BASE_DELAY = 6.0         # r1 Nav2 right after Cartographer (5 s) sets up map->odom TF
-        NAV2_CONFIGURE_OFFSET = 4.0   # stagger per robot so configure phases don't overlap
 
         chain: list = []
-        gates: list[ExecuteProcess] = []
+        gates: list[ExecuteProcess] = [nav2_gate_process(ns) for ns in ROBOT_NAMESPACES]
         for i, ns in enumerate(ROBOT_NAMESPACES):
-            chain.append(TimerAction(
-                period=NAV2_BASE_DELAY + i * NAV2_CONFIGURE_OFFSET,
-                actions=[nav2_by_ns[ns]],
-            ))
-            gates.append(nav2_gate_process(ns))
+            if i == 0:
+                chain.append(TimerAction(period=NAV2_BASE_DELAY, actions=[nav2_by_ns[ns]]))
+            else:
+                chain.append(RegisterEventHandler(OnProcessExit(
+                    target_action=gates[i - 1],
+                    on_exit=[nav2_by_ns[ns]],
+                )))
 
         # Start all gates immediately (they just block on their action server),
         # and launch the explorer when the last one still running exits. A tiny

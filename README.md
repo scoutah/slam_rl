@@ -1,154 +1,161 @@
 # SLAM RL
 
-TurtleBot3-basiertes SLAM-Projekt: zwei namespaced Burger-Roboter erkunden
-zufällig generierte, zimmerartige Welten in Gazebo. Jeder Roboter fährt eigenes
-Cartographer + Nav2; die lokalen Karten werden zu einer globalen `/map`
-zusammengeführt, auf der Frontier-Erkennung, Coverage und Episodenende laufen.
-Ein Explorer wählt Frontier-Ziele – klassisch (Cost-Utility) oder per RL (DQN).
+Zwei namespaced TurtleBot3-Burger erkunden zufällig generierte, zimmerartige Welten
+in Gazebo. Jeder Roboter fährt eigenes Cartographer + Nav2; die lokalen Karten werden
+zu einer globalen `/map` zusammengeführt, auf der Frontier-Erkennung, Coverage und
+Episodenende laufen. Ein Explorer wählt die Frontier-Ziele – klassisch (Cost-Utility)
+oder per RL (QMIX).
 
 ## Pakete
 
 | Paket | Beschreibung |
 |---|---|
-| `tb3_slam` | Launch, Welten-Generierung, Map-Merging, geteilte Libs, Episodenverwaltung |
+| `tb3_slam` | Launch, Weltengenerator, Map-Merging, Frontier-Pipeline, Explorer-Basisnode, Episodenverwaltung |
 | `tb3_exploration` | Klassischer Explorer (Cost-Utility) |
-| `tb3_reinforced_exploration` | RL-Explorer (DQN) |
+| `tb3_reinforced_exploration` | RL-Explorer (QMIX, CTDE) |
 
 ## Installation
 
-Ziel: **Ubuntu 24.04 + ROS 2 Jazzy + Gazebo (gz-sim)**. Läuft nicht auf macOS.
+Ziel: **Ubuntu 24.04 + ROS 2 Jazzy + Gazebo (gz-sim)**. Läuft nicht auf macOS
+(dort: Docker, siehe `docker/README.md`).
 
 ```bash
 sudo apt install \
   ros-jazzy-turtlebot3 ros-jazzy-turtlebot3-simulations \
-  ros-jazzy-cartographer-ros ros-jazzy-nav2-bringup
+  ros-jazzy-cartographer-ros ros-jazzy-nav2-bringup ros-jazzy-ros-gz
 
 export TURTLEBOT3_MODEL=burger            # in ~/.bashrc aufnehmen
 source /opt/ros/jazzy/setup.bash          # in ~/.bashrc aufnehmen
 ```
 
-Bauen (immer aus dem Repo-Root, **nie** aus `src/`); nach jedem Build neu sourcen:
+Bauen immer aus dem Repo-Root (**nie** aus `src/`), danach neu sourcen:
 
 ```bash
 colcon build && source install/setup.bash
 ```
 
-Der RL-Explorer braucht PyTorch in einem projektlokalen `.venv` (das Launch-File
-injiziert dessen `site-packages` in den `PYTHONPATH`).
+Der RL-Explorer braucht PyTorch in einem projektlokalen `.venv`; das Launch-File hängt
+dessen `site-packages` an den `PYTHONPATH`.
 
 ## Starten
 
 ```bash
-# Klassisch (Standard) / RL / nackter Stack (Ziele von außen)
+# exploration_mode: classic (Standard) | rl | none (nackter Stack, Ziele von außen)
 ros2 launch tb3_slam sim_slam.launch.py exploration_mode:=classic
-ros2 launch tb3_slam sim_slam.launch.py exploration_mode:=rl
-# weitere Args: headless:=true, rviz:=false, world_size:=12
+# weitere Args: headless:=true, rviz:=false, world_size:=8|12, coverage_threshold:=0.97
 
-# Episodisches Training (siehe --help für alle Optionen)
-python3 training_runner.py --mode classic --episodes 20 --headless --world-size 12
-python3 training_runner.py --world worlds/<id>.sdf --episodes 5   # Welt wiederverwenden
-python3 training_runner.py --mode rl --episodes 50 --headless --sim-speed 4   # Gazebo bis zu 4x schneller
+# Episodisches Training (alle Optionen: --help)
+python3 training_runner.py --mode classic --episodes 20 --headless --randomize-worlds --world-size 12
+python3 training_runner.py --mode rl --episodes 50 --headless --sim-speed 4
+python3 training_runner.py --world worlds/<id>.sdf --episodes 5     # gespeicherte Welt
 
-# Offline-Check des Weltengenerators (nur numpy, kein ROS)
-python3 tools/check_world_connectivity.py
+python3 tools/check_world_connectivity.py     # Offline-Check des Generators (nur numpy)
 ```
 
-Das Episoden-Timeout ist nicht konfigurierbar; es folgt der Weltgröße
-(600 s bei 8 × 8 m, 900 s bei 12 × 12 m) und zählt in **Simulationszeit**
-(ebenso Stuck-Fenster, Warm-up und `elapsed_s` im CSV).
-
-**Schnellere Simulation:** `--sim-speed N` (bzw. Env `SLAM_SIM_SPEED=N` bei `ros2 launch`)
-setzt den Ziel-Realtime-Faktor von Gazebo (Standard 1 = Echtzeit, 0 = unbegrenzt). Die
-erreichte Geschwindigkeit ist CPU-begrenzt und lässt sich mit `gz topic -e -t /stats`
-(`real_time_factor`) prüfen; wird die Sim zu schnell, verschlechtern sich Odometrie/Scans/
-Planung. Die Welt-Datei wird dabei nicht verändert (gepatchte Kopie unter
-`/tmp/slam_world_speed.sdf`).
-
-Simulation mit `Ctrl+C` beenden; überlebt Gazebo das, `pkill -9 -f gz`.
+- **Weltgrößen:** nur 8 und 12 (m Kantenlänge) sind erlaubt. Ohne `--randomize-worlds`
+  wird *eine* Welt für alle Episoden wiederverwendet; `--world-size` ist mit `--world` nicht erlaubt.
+- **Timeout:** nicht konfigurierbar, folgt der Weltgröße (600 s bei 8 m, 900 s bei 12 m).
+  Alle Zeiten (Timeout, Stuck-Fenster, Warm-up, `elapsed_s` im CSV) zählen in **Simulationszeit**.
+- **Sim-Speed:** `--sim-speed N` (bzw. Env `SLAM_SIM_SPEED=N` bei `ros2 launch`) setzt den
+  Ziel-Realtime-Faktor (1 = Echtzeit, 0 = unbegrenzt) über eine gepatchte Weltkopie
+  `/tmp/slam_world_speed.sdf`. Erreicht wird, was die CPU hergibt (`gz topic -e -t /stats`);
+  zu hohe Faktoren verschlechtern Odometrie, Scans und Planung.
+- **Episodenende:** Coverage ≥ Schwelle (0,97), `stuck` (< 0,5 % Zuwachs in 90 s), `timeout`
+  oder `exhausted` (Team 15 Sim-s ohne Ziel). `exhausted`-Welten kopiert der Runner nach
+  `worlds/`, damit sie mit `--world` wiederholbar sind.
+- Beenden mit `Ctrl+C`; überlebt Gazebo das: `pkill -9 -f gz`.
 
 ## Tests
 
 ```bash
 colcon build && source install/setup.bash
-colcon test --packages-select tb3_slam && colcon test-result --verbose
+colcon test && colcon test-result --verbose
 ```
 
-`colcon test` liefert Exit 0 auch bei Fehlern – immer `colcon test-result`
-lesen.
+`colcon test` liefert Exit 0 auch bei Fehlern – immer `colcon test-result` lesen.
+Enthalten sind auch flake8/pep257.
 
-## Klassische Exploration
+## Methoden
 
-`classic_explorer` verteilt bestätigte Nav2-Pfade mit einer Greedy-Cost-Utility-
-Zuweisung. Der Nutzen schätzt die sichtbare unbekannte/unsichere Fläche innerhalb
-von 3,5 m; bekannte Wände verdecken dahinterliegende Zellen. Bereits vergebene
-Frontiers und überlappende Sichtbereiche werden bei weiteren Zuweisungen
-berücksichtigt. Ein Rivalen-Abschlag (`utility_gamma`, 0,3) bestraft Ziele, die dem Teamkollegen (Ziel bzw. Position) näher liegen als dem Bieter – so fahren Roboter nicht quer über die Karte in das Gebiet des anderen. Laufende Fahrten bleiben stabil, freie Roboter erhalten neue Ziele.
-Die Methode verwendet auf 8×8 und 12×12 dieselben Parameter und lernt nichts.
-Formel und Greedy-Entscheidung sind in `tb3_exploration/cost_utility.py` dokumentiert.
+**Klassisch** (`classic_explorer`): Greedy-Cost-Utility über bestätigte Nav2-Pfade. Der Nutzen
+ist die sichtbare unbekannte/unsichere Fläche im Sensorradius (3,5 m; bekannte Wände
+verdecken), abzüglich bereits vergebener Frontiers und überlappender Sichtbereiche. Ein
+Rivalen-Abschlag (`utility_gamma`, 0,3) bestraft Ziele, die dem Teamkollegen näher liegen.
+Laufende Fahrten bleiben stabil, freie Roboter bekommen neue Ziele. Dieselben Parameter auf
+8 × 8 und 12 × 12, kein Lernen. Details: `tb3_exploration/cost_utility.py`.
+
+**RL** (`rl_explorer`): QMIX mit zentralem Training und dezentraler Ausführung. Jeder freie
+Roboter bewertet seine Frontiers mit einem geteilten Agenten-Netz auf einer lokalen
+Beobachtung; die Roboter entscheiden nacheinander und teilen ihre Ziele als Intents
+(Kandidaten in der Nähe eines Intents entfallen). Nur das Training nutzt den globalen
+Zustand (QMIX-Mixer, Team-Reward = Coverage-Zuwachs pro Sekunde). Alle Features sind
+auf die Kartendiagonale normiert, damit ein auf 8 × 8 trainiertes Netz auf 12 × 12 übertragbar
+ist. Checkpoint, Replay und ε liegen in `$SLAM_RL_DATA_DIR` (Standard `<ws>/rl_data`);
+ohne Checkpoint startet ein frisches Netz.
 
 ## Code map
 
-Index mit einer Zeile pro Datei. **Vor jeder Code-Änderung lesen, nach jeder
-Änderung aktualisieren.** Tiefere Begründungen stehen als kurzer Kommentar an der
-betreffenden Stelle im Code, nicht hier und nicht in langen Datei-Headern.
+Index mit einer Zeile pro Datei. **Vor jeder Änderung lesen, bei jeder Änderung aktualisieren.**
+Begründungen stehen als kurzer Kommentar im Code.
 
-### `src/tb3_slam` — geteiltes Paket
-
-| Datei | Inhalt |
-|---|---|
-| `launch/sim_slam.launch.py` | Start des gesamten Stacks (die Static-TFs `map→<ns>/map` liegen auch auf `/<ns>/tf_static`, damit Nav2 auf `map` planen kann): Weltgen → gz → pro Roboter Spawn/Bridge/Relay/RSP (2 s)/Cartographer (5 s)/Start-Spin (6 s) (parallel) → Nav2 via `nav2_slim.launch.py` **nahezu parallel, pro Roboter mit kleinem Configure-Versatz** (r1 @6 s, r2 @10 s; keine überlappende change_state-Phase) → Map-Merge → Explorer startet, sobald beide `nav2_gate` beendet sind (kein fester Timer). `exploration_mode:=classic\|rl\|none`. |
-| `launch/nav2_slim.launch.py` | Abgespeckter Nav2-Bringup (Ersatz für Upstream `navigation_launch.py`): lifecycle-managed nur die 5 vom Explorer genutzten Nodes — `controller_server`, `planner_server`, `behavior_server`, `bt_navigator`, `velocity_smoother`. Ausgelassen: `smoother_server`, `route_server`, `collision_monitor` (per `cmd_vel_relay` ohnehin umgangen), `waypoint_follower`, `docking_server` → schnellere, robustere Aktivierung. |
-| `tb3_slam/utils.py` | `generate_random_world` (BSP-Haus, nur Studiengrößen 8/12), `spawn_poses`/`load_spawns`, Welt-Metadaten-I/O; `apply_sim_speed`/`speed_up_world`/`sim_speed_from_env` (Physik-Timing für `SLAM_SIM_SPEED`). |
-| `tb3_slam/multi_robot.py` | Pure-Python-Namespacing der Upstream-TurtleBot3-Configs (model.sdf / Bridge / Cartographer-lua / Nav2-Params; globale Costmap und `bt_navigator` planen auf der gemergten `/map`, Frame `map`; die Costmap-Inflation ist auf 0,30 m reduziert, damit 1,1-m-Türen befahrbar bleiben). Unit-getestet, kein ROS. |
-| `tb3_slam/map_merging.py` | Pure-numpy-Fusion: feste Ausdehnung im `map`-Frame, zustandsbehaftete Zell-Priorität (WALL > sticky-FREE > UNCERTAIN > UNKNOWN). Erhält die `frontier_utils`-Zellklassen. `clear_robot_footprints` gibt die aktuelle Footprint-Scheibe (0,22 m) jedes Roboters frei, damit ein Teamkollege, der ihn als Wand sieht, seinen Frontier-Seed nicht dauerhaft blockiert. |
-| `tb3_slam/map_merger.py` | ROS-Node um `map_merging`: abonniert `/<ns>/map`, publiziert `/map` mit 2 Hz TRANSIENT_LOCAL. Liest Roboterposen aus `/<ns>/tf[_static]` + globalem `/tf_static` (unabhängig vom Viz-`tf_relay`) für `clear_robot_footprints`. |
-| `tb3_slam/frontier_utils.py` | Geteilte Frontier-Erkennung: Zellklassen (0–25 frei, 26–74 unsicher, 75–100 Wand, −1 unbekannt), BFS über freie Zellen, Aussichtspunkt-Ziel `_viewpoint_goal` (liegt der Centroid < 0,75 m vom Roboter, wird statt „kein Ziel“ eine erreichbare Zelle ≥ 0,75 m vom Roboter und ≤ 2 m vom Centroid mit freier Sichtlinie gewählt), Phantom-Filter `filter_phantom_groups` (verwirft Gruppen < 4 Zellen und „Wand-Sandwich“-Gruppen: unsichere Zelle mit Wand, aber ohne Unbekannt im 7×7-Fenster), Gruppen-Centroids (+ zugehörige Frontier-Zellen `centroid_frontiers`): Mittelwert → nächste freie Zelle → ist sie nicht footprint-sicher/erreichbar, wird das Ziel zuerst um den Footprint-Radius (0,22 m) von der Frontier-Linie nach außen geschoben (Normale zur freien Seite); scheitert das (enger Raum), gilt die erste erreichbare Zelle auf dem kürzesten freien Zellpfad (`free_space_parents`, Dijkstra 8-verbunden mit Wandabstands-Strafe wie die Nav2-Costmap, damit der Pfad nicht an der Wand klebt) vom Ziel Richtung Roboter, kein Ziel bei fehlendem Pfad; BFS-Seed fällt auf freie Nachbarzellen zurück, wenn die Roboterzelle nicht frei ist. Performance: `find_frontiers` (numpy-Maske `_frontier_mask` + BFS auf flachen Indizes) und `free_space_parents` (Dijkstra auf flachen Listen) sind ~4× schneller als die frühere Dict-/Tupel-Version bei identischem Ergebnis (`test_frontier_equivalence.py`). Keine ROS-Messages außer OccupancyGrid. |
-| `tb3_slam/frontier_viz.py` | RViz-MarkerArray für Frontiers, Centroids und je Roboter ein farbiges Ziel (`extra_goals`). Hält ROS-Viz aus `frontier_utils` heraus. |
-| `tb3_slam/multi_robot_explorer.py` | Basis-Node + ROS-freie Typen (`Goal`, `RobotState`, `FrontierCandidate`). Besitzt alle ROS-I/O und Ziel-Überwachung; publiziert die Frontier-/Centroid-Marker auf `/frontiers_viz` nur, wenn ein Subscriber existiert, und höchstens alle `viz_min_period` (2 s Wall-Zeit). `frontier_analysis` memoisiert `centroids_from_map_debug` pro Kartennachricht und Roboterzelle, damit Marker und Zielwahl die teure Pipeline nicht doppelt rechnen. Beendet die Episode als `exhausted (coverage=…)`, wenn das gesamte Team `exhausted_idle_s` (15 Sim-s) lang kein aktives Ziel hatte, obwohl die Schwelle nicht erreicht ist (`IdleTracker`, ROS-frei) — die Methode findet dann nichts mehr zuzuweisen. Bei „NO PROGRESS“ loggt er Pose, Ziel und Abstand zum Teammitglied und startet eine Recovery-Eskalation (`_recover`): Costmaps leeren → zusätzlich 0,3 m zurücksetzen → zusätzlich 90° drehen, danach von vorn, bis wieder ein Ziel gelingt; währenddessen (`recovering`) bekommt der Roboter kein neues Ziel. Speist seinen TF-Buffer direkt aus `/<ns>/tf[_static]` (plus globales `/tf_static` für `map→<ns>/map`), also unabhängig vom Viz-`tf_relay`. Dispatcht Ziele im robotereigenen `<ns>/map`-Frame (Nav2 kennt den gemergten `map`-Frame nicht). Subklassen überschreiben nur `select_goals(merged_map, [RobotState])`. |
-| `tb3_slam/information_gain.py` | Geteilte, verdeckungsbewusste Informationsgewinn-Schätzung für Frontier-Ziele (`visible_information`: Strahlen im Sensorradius, enden an bekannten Wänden; `InformationField`: Cache pro Karte, Anteil der Sensorfläche). Von klassischem und RL-Explorer genutzt. Keine ROS-Imports. |
-| `tb3_slam/path_cost.py` | ROS-freie Helfer für den Nav2-Pfadkosten-Cache (`cost_key`, `path_length`). |
-| `tb3_slam/coverage_monitor.py` | `timeout_for_world_size` (600 Sim-s @8 m, 900 Sim-s @12 m), Expected-Cells / Coverage. |
-| `tb3_slam/episode_manager.py` | Beobachtet die gemergte `/map`; beendet bei Coverage ≥ Schwelle, stuck (<0,5 %/90 s) oder Timeout (alle Zeiten in Simulationszeit); schreibt `/tmp/slam_episode_done` (löscht beim Start eine veraltete Datei; überschreibt eine bereits vom Explorer geschriebene Datei, z. B. `exhausted`, nicht) und spiegelt die Sim-Dauer jede Sekunde nach `/tmp/slam_episode_done.sim_s`; der Explorer bricht beim Erscheinen der Datei seine Ziele ab. |
-| `tb3_slam/cmd_vel_relay.py` | Nav2 `/<ns>/cmd_vel_smoothed` (Twist) → `/<ns>/cmd_vel` (TwistStamped, für die Jazzy-gz-Bridge). |
-| `tb3_slam/tf_relay.py` | Reine Visualisierungshilfe: spiegelt `/<ns>/tf` auf globales `/tf`, damit RViz das RobotModel zeigt. Nur mit RViz gestartet; der Explorer hängt nicht mehr davon ab. |
-| `tb3_slam/nav2_gate.py` | Kurzlebiger Prozess (`nav2_gate --ns <ns>`): blockiert auf `/<ns>/navigate_to_pose`, Exit 0 sobald Nav2 aktiv / Exit 1 bei Timeout. Launch startet beide Gates sofort; r2s Nav2 startet erst, wenn das Gate von r1 beendet ist (strikt nacheinander, sonst hängt r2s Lifecycle-Bringup); der Explorer startet, sobald das letzte Gate beendet ist (`OnProcessExit`-Countdown) — signalbasiert statt per festem Delay. |
-| `test/test_explorer_launch.py` | Prüft die eigenständige Methodenwahl und die TF-Verdrahtung: `tf_relay` nur mit RViz, `map→<ns>/map` auf globalem `/tf_static`. |
-| `test/test_frontier_equivalence.py` | Vergleicht `find_frontiers` und `free_space_parents` auf Zufallskarten exakt mit den ursprünglichen Referenzimplementierungen (Orakel für die Performance-Umbauten). |
-| `test/test_robot_footprints.py` | Prüft, dass kartierte Mitroboter den eigenen Start nicht blockieren und Wände außerhalb des Footprints erhalten bleiben. |
-
-### `src/tb3_exploration` — klassische Methode
+### `src/tb3_slam`
 
 | Datei | Inhalt |
 |---|---|
-| `tb3_exploration/multi_robot_explorer.py` | `ClassicExplorer`: asynchrone, pro Roboter serielle Nav2-Pfadprüfung, aktuelle Kartenvalidierung, Greedy-Teamzuweisung, Reservierungen und Wiederanlauf nach Fehlzielen. |
-| `tb3_exploration/cost_utility.py` | Stdlib-Entscheidungskern: Greedy-Zuweisung mit marginalem Informationsgewinn, normierten Pfadkosten und Rivalen-Abschlag `rival_gap` (die Informationszellen kommen aus `tb3_slam/information_gain.py`). |
-| `tb3_exploration/frontier_explorer.py` | Alter Single-Robot-Frontier-Node (nicht mehr gelauncht). Referenz für Ziel-Überwachung/Ranking. |
-| `test/test_cost_utility.py` | Deterministische Prüfungen von Nutzen, Kosten, Teamkopplung und exklusiver Zuweisung. |
-| `test/test_classic_explorer.py` | ROS-/Nav2-Grenztests für Pfadbestätigung, Timeouts, verspätete Antworten, Kartenänderungen und Zielüberwachung. |
+| `launch/sim_slam.launch.py` | Gesamtstack: Welt (generiert oder `SLAM_WORLD_FILE`) → gz-Server (+GUI) + `/clock`-Bridge → pro Roboter parallel Spawn, Bridge, `cmd_vel_relay`, RSP (2 s), Cartographer (5 s), Start-Spin (6 s) → Nav2 **strikt nacheinander** (r1 @6 s, r2 sobald r1s `nav2_gate` endet; parallele Lifecycle-Aufrufe hängen) → Explorer, sobald das letzte `nav2_gate` endet. `episode_manager`, `map_merger` und die Static-TFs `map→<ns>/map` starten sofort. |
+| `launch/nav2_slim.launch.py` | Schlanker Nav2-Bringup: nur `controller_server`, `planner_server`, `behavior_server`, `bt_navigator`, `velocity_smoother` sind lifecycle-managed (kein `smoother_server`, `route_server`, `collision_monitor`, `waypoint_follower`, `docking_server`). |
+| `rviz/sim_slam.rviz` | RViz-Konfiguration. |
+| `tb3_slam/utils.py` | Weltengenerator (`generate_random_world`, BSP-Haus, nur Größen 8/12), `spawn_poses`/`load_spawns`, Metadaten-I/O, Sim-Speed-Patch (`apply_sim_speed`, `speed_up_world`, `sim_speed_from_env`). |
+| `tb3_slam/multi_robot.py` | Namespacing der Upstream-Configs (model.sdf, Bridge, Cartographer-lua, Nav2-Params). Globale Costmap und `bt_navigator` planen auf der gemergten `/map` (Frame `map`), Inflation 0,30 m, damit 1,1-m-Türen passierbar bleiben. Ohne ROS, unit-getestet. |
+| `tb3_slam/map_merging.py` | Numpy-Fusion auf festem Gitter im Frame `map`, Zell-Priorität WALL > sticky-FREE > UNCERTAIN > UNKNOWN; `clear_robot_footprints` gibt die 0,22-m-Scheibe jedes Roboters frei (Teamkollegen erscheinen sonst als Wand). |
+| `tb3_slam/map_merger.py` | Node: `/<ns>/map` → `/map` (2 Hz, TRANSIENT_LOCAL); Roboterposen aus `/<ns>/tf[_static]` für die Footprint-Freigabe. |
+| `tb3_slam/frontier_utils.py` | Geteilte Frontier-Pipeline: Zellklassen, Frontier-Erkennung, Gruppierung, Phantom-Filter, Zielwahl (Mittelwert → nächste freie Zelle → nach außen schieben → sonst erste erreichbare Zelle auf dem Dijkstra-Pfad → Aussichtspunkt, wenn < 15 Zellen vom Roboter), `grid_to_world`/`world_to_grid`. Nur `OccupancyGrid` als ROS-Typ. |
+| `tb3_slam/frontier_viz.py` | RViz-MarkerArray für Frontiers, Centroids und Roboterziele. |
+| `tb3_slam/information_gain.py` | Verdeckungsbewusster Informationsgewinn (`visible_information`, `InformationField`); von beiden Explorern genutzt. Ohne ROS. |
+| `tb3_slam/path_cost.py` | Schlüssel und Länge für den Nav2-Pfadkosten-Cache. Ohne ROS. |
+| `tb3_slam/multi_robot_explorer.py` | Basisnode `MultiRobotExplorerNode` + Typen (`Goal`, `RobotState`, `FrontierCandidate`, `IdleTracker`). Besitzt alle ROS-I/O: gemergte `/map`, TF-Buffer aus `/<ns>/tf[_static]`, Zielversand im `<ns>/map`-Frame, Zielüberwachung (Timeout 45 s, kein Fortschritt 8 s → Recovery: Costmaps leeren → 0,3 m zurück → 90° drehen), Pfadkosten-Cache, Marker auf `/frontiers_viz`, `exhausted`-Erkennung. Hilfen für Subklassen: `candidates_for`, `path_cost`; Strategie über `select_goals` (oder eigenes `_decide`). |
+| `tb3_slam/coverage_monitor.py` | `timeout_for_world_size`, erwartete Zellen, Coverage. |
+| `tb3_slam/episode_manager.py` | Beendet die Episode auf der gemergten `/map` (Coverage, stuck, Timeout; erste 15 s ignoriert); schreibt `/tmp/slam_episode_done` (überschreibt keine vorhandene Datei) und jede Sekunde `….sim_s`; publiziert `/episode/coverage`. |
+| `tb3_slam/cmd_vel_relay.py` | `/<ns>/cmd_vel_smoothed` (Twist) → `/<ns>/cmd_vel` (TwistStamped für die gz-Bridge). |
+| `tb3_slam/tf_relay.py` | Nur für RViz: spiegelt `/<ns>/tf` auf globales `/tf`. Der Explorer braucht es nicht. |
+| `tb3_slam/nav2_gate.py` | Blockiert auf `/<ns>/navigate_to_pose`; Exit 0 bei aktivem Nav2, 1 bei Timeout. Taktgeber für Nav2-Reihenfolge und Explorer-Start. |
+| `test/` | Unit-Tests ohne laufende Sim (Generator, Metadaten, Merging, Frontier-Pipeline inkl. Äquivalenz zur Referenzimplementierung, Namespacing, Launch-Verdrahtung, Sim-Speed, Info-Gain, Footprints). |
 
-### `src/tb3_reinforced_exploration` — RL-Methode
+### `src/tb3_exploration`
 
 | Datei | Inhalt |
 |---|---|
-| `tb3_reinforced_exploration/multi_robot_explorer.py` | `RLExplorer` (Node `rl_explorer`): zentraler CTDE-Allokator. Überschreibt `select_goals`, weist beiden Robotern je ein distinktes Frontier zu (ein geteiltes Q-Netz, geteilter Replay), Team-Reward (globaler Coverage-Zuwachs), Persistenz über `data_dir`/`$SLAM_RL_DATA_DIR`. |
-| `tb3_reinforced_exploration/rl_core.py` | ROS-freier Lernkern: Features (einzeln + team-aware `make_team_features`), ε-greedy-Policy + Decay, Reward, Replay-Buffer mit Persistenz, Q-Netz (konfigurierbare Feature-Dim), `TeamLearner` (CTDE: Parameter-Sharing + geteilter Buffer), Persist-Dir-Auflösung. Torch lazy importiert. Unit-getestet. |
-| `tb3_reinforced_exploration/rl_agent.py` | Alter Single-Robot-DQN-Node (nicht mehr gelauncht). Nutzt `rl_core`. |
+| `tb3_exploration/multi_robot_explorer.py` | `ClassicExplorer`: überschreibt `_decide` – prüft Kandidaten pro Roboter seriell per Nav2-`ComputePathToPose`, weist greedy zu, merkt sich gescheiterte Ziele. |
+| `tb3_exploration/cost_utility.py` | Entscheidungskern (stdlib): `Bid`, `greedy_assignment` mit marginalem Gewinn, normierten Pfadkosten und Rivalen-Abschlag. |
+| `tb3_exploration/frontier_explorer.py` | Alter Ein-Roboter-Node (nicht gelauncht). |
+| `test/` | Nutzen/Zuweisung, Explorer-Grenzfälle gegen Nav2-Mocks, Zielüberwachung des alten `FrontierExplorer`. |
 
-### Top-Level-Skripte
+### `src/tb3_reinforced_exploration`
 
 | Datei | Inhalt |
 |---|---|
-| `training_runner.py` | Episoden-Loop (bei `exhausted`-Episoden wird die Welt samt `.meta.json` nach `worlds/` kopiert, Wiederholung per `--world`): Welt generieren/wiederverwenden, Sim starten (`--sim-speed`), `/tmp/slam_episode_done` pollen, Prozessgruppe killen, CSV in `results/` schreiben (`elapsed_s` = Sim-Sekunden, dazu `wall_s`, `sim_speed`). |
-| `tools/check_world_connectivity.py` | Offline-Check (nur numpy): Freiraum-Konnektivität + Spawn-Erreichbarkeit für beide Studiengrößen. |
-| `tools/profile_frontiers.py` | Benchmark (ROS-Python `/usr/bin/python3`, sourced): rastert eine frische 8/12-m-Welt zu synthetischen Teilkarten und misst `find_frontiers`, `free_space_parents`, `reachable_goal_cells` und den Gesamtaufruf `centroids_from_map_debug` (`--size`, `--world`, `--cprofile`). Überschreibt `/tmp/slam_world_meta.json`. |
-| `tools/dump_map.py` | Debug-Tool (ROS, System-Python `/usr/bin/python3`, sourced Umgebung): speichert während einer laufenden Sim alle 10 s die gemergte `/map` plus Roboterzellen als `map_NNN.npz` nach `/tmp/slam_map_dump/` (`--out`, `--period`). |
-| `tools/analyze_map_dump.py` | Offline (numpy + pillow): spielt einen Dump durch die Frontier-Pipeline und rendert PNG (Frontiers rot, Ziele blau, Roboter grün) + gibt Gruppen/Ziele aus. |
+| `tb3_reinforced_exploration/multi_robot_explorer.py` | `RLExplorer`: überschreibt `select_goals` (dezentrale Runde mit Intents), zeichnet gemeinsame Ereignisse auf, trainiert online, speichert am Episodenende. |
+| `tb3_reinforced_exploration/rl_core.py` | ROS-freier Kern: lokale Beobachtung (5 Features) und globaler Zustand (4), Intent-Filter, `decentralised_round`, Reward, ε-Decay pro Episode, Replay, `QMixLearner` (`agent.pt`, `mixer.pt`, `joint_replay.pkl`, `qmix_meta.pkl`), `resolve_persist_dir`. Torch lazy. Enthält auch den alten DQN-Teil für `rl_agent`. |
+| `tb3_reinforced_exploration/rl_agent.py` | Alter Ein-Roboter-DQN-Node (nicht gelauncht). |
+| `test/test_rl_core.py` | Tests des Lernkerns. |
 
-### Inter-Prozess-Dateien (`/tmp`)
+### Top-Level
 
-- `/tmp/slam_world_meta.json` — `expected_traversable_cells`, `spawns`, `world_size`; von `generate_random_world` geschrieben, von `coverage_monitor` gelesen. Beim Wiederverwenden einer Welt wird deren `<world>.meta.json`-Sidecar hierher kopiert.
-- `/tmp/slam_map_dump/map_NNN.npz` — Karten-Snapshots von `tools/dump_map.py` (nur bei Bedarf).
-- `/tmp/slam_episode_done` — Episoden-Endgrund; von `episode_manager` oder dem Explorer (`exhausted`) geschrieben, von `training_runner.py` gepollt.
-- `/tmp/slam_episode_done.sim_s` — Sim-Sekunden seit Episodenstart; von `episode_manager` jede Sim-Sekunde (atomar) geschrieben, vom Runner für `elapsed_s` gelesen.
-- `/tmp/slam_world_speed.sdf` — Kopie der Welt mit angepasstem Physik-Timing, nur wenn `SLAM_SIM_SPEED` ≠ 1.
-- `results/<dd-mm-yyyy>-<mode>-<runid>.csv` — `;`-getrennt (Spalten `elapsed_s` [Sim-s], `world_size`, `wall_s`, `sim_speed`).
+| Datei | Inhalt |
+|---|---|
+| `training_runner.py` | Episoden-Loop: Welt erzeugen/wiederverwenden, Launch mit `SLAM_WORLD_FILE`/`SLAM_SIM_SPEED`, auf `/tmp/slam_episode_done` warten, Prozesse beenden, CSV schreiben. |
+| `tools/check_world_connectivity.py` | Offline (numpy): Konnektivität und Spawn-Erreichbarkeit für beide Größen. |
+| `tools/profile_frontiers.py` | Benchmark der Frontier-Pipeline (System-Python, sourced); überschreibt `/tmp/slam_world_meta.json`. |
+| `tools/dump_map.py` | Speichert alle 10 s die gemergte `/map` + Roboterzellen als `.npz` (laufende Sim, sourced). |
+| `tools/analyze_map_dump.py` | Offline (numpy + pillow): Dump durch die Frontier-Pipeline, PNG-Rendering. |
+| `Dockerfile`, `compose.yaml`, `docker/` | Headless-Image für Training; siehe `docker/README.md`. |
+
+### Artefakte
+
+- `/tmp/slam_world_meta.json` — `expected_traversable_cells`, `spawns`, `world_size`; vom Generator geschrieben, von `coverage_monitor` gelesen. Bei `--world` wird das `<world>.meta.json`-Sidecar hierher kopiert.
+- `/tmp/slam_episode_done` — Endgrund; von `episode_manager` oder Explorer (`exhausted`) geschrieben, vom Runner gelesen.
+- `/tmp/slam_episode_done.sim_s` — Sim-Sekunden seit Start; vom Runner für `elapsed_s` gelesen.
+- `/tmp/slam_world_speed.sdf` — Weltkopie mit angepasstem Physik-Timing (nur bei `SLAM_SIM_SPEED` ≠ 1).
+- `/tmp/slam_map_dump/map_NNN.npz` — Ausgabe von `tools/dump_map.py`.
+- `results/<dd-mm-yyyy>-<mode>-<runid>.csv` — `;`-getrennt: `timestamp, episode, mode, reason, elapsed_s` (Sim-s)`, coverage, world, world_size, wall_s, sim_speed`.
+- `worlds/`, `results/`, `rl_data/` sind gitignored.

@@ -18,7 +18,7 @@ fi
 export TURTLEBOT3_MODEL="${TURTLEBOT3_MODEL:-burger}"
 
 # Persist the RL model/replay buffer to a stable, mountable location.
-# rl_agent.py reads SLAM_RL_DATA_DIR first (see _resolve_persist_dir); defaulting
+# rl_core.resolve_persist_dir reads SLAM_RL_DATA_DIR first; defaulting
 # it here points persistence at <workspace>/rl_data, which is a mounted volume.
 export SLAM_RL_DATA_DIR="${SLAM_RL_DATA_DIR:-${WORKSPACE}/rl_data}"
 mkdir -p "${SLAM_RL_DATA_DIR}"

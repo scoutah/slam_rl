@@ -75,7 +75,8 @@ class ClassicExplorer(MultiRobotExplorerNode):
         queues = {}
         for ns, io in self._robots.items():
             pos = self._robot_pos(io)
-            if io.goal_active or pos is None or not io.path_client.server_is_ready():
+            if (io.goal_active or io.recovering or pos is None
+                    or not io.path_client.server_is_ready()):
                 continue
             candidates = [c for c in candidates_for_robot(
                 self._round_map, RobotState(ns, *pos)) if not self._was_failed(ns, c.x, c.y)]

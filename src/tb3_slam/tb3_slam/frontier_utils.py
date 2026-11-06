@@ -37,80 +37,67 @@ def find_frontiers(
     walled area.
     """
     rows, cols = grid.shape
-    cardinal = [(-1, 0), (1, 0), (0, -1), (0, 1)]
-    _seeds: set[tuple[int, int]] = free_seeds if free_seeds is not None else set()
-
-    def _is_free(r: int, c: int) -> bool:
-        if (r, c) in _seeds:
-            return True
-        v = grid[r, c]
-        return 0 <= v <= FREE_MAX
-
-    def _is_frontier(r: int, c: int) -> bool:
-        has_uncertain = False
-        for dr, dc in cardinal:
-            nr, nc = r + dr, c + dc
-            if not (0 <= nr < rows and 0 <= nc < cols):
-                continue
-            v = grid[nr, nc]
-            if FRONTIER_MIN <= v <= FRONTIER_MAX:
-                has_uncertain = True
-        if not has_uncertain:
-            return False
-        for dr in range(-2, 3):
-            for dc in range(-2, 3):
-                if dr == 0 and dc == 0:
-                    continue
-                nr, nc = r + dr, c + dc
-                if not (0 <= nr < rows and 0 <= nc < cols):
-                    continue
-                if grid[nr, nc] >= WALL_MIN:
-                    return False
-        return True
+    free = (grid >= 0) & (grid <= FREE_MAX)
+    if free_seeds:
+        for r, c in free_seeds:
+            if 0 <= r < rows and 0 <= c < cols:
+                free[r, c] = True
+    is_frontier = _frontier_mask(grid)
 
     # ── BFS path ────────────────────────────────────────────────────────
     if robot_grid_pos is not None:
         sr, sc = robot_grid_pos
         if 0 <= sr < rows and 0 <= sc < cols:
-            visited: set[tuple[int, int]] = set()
-            frontier_set: set[tuple[int, int]] = set()
-            queue: deque[tuple[int, int]] = deque()
-
-            if _is_free(sr, sc):
-                queue.append((sr, sc))
-                visited.add((sr, sc))
+            # Flat indices on a grid padded by one blocked cell: no bounds checks.
+            width = cols + 2
+            blocked = np.pad(~free, 1, constant_values=True).ravel().tolist()
+            front = np.pad(is_frontier, 1).ravel().tolist()
+            steps = [-width, width, -1, 1]      # N, S, W, E like the original BFS
+            start = (sr + 1) * width + sc + 1
+            queue: deque[int] = deque()
+            if not blocked[start]:
+                queue.append(start)
+                blocked[start] = True           # visited == blocked
             else:
                 # Robot cell isn't FREE yet — seed from free cardinal neighbours.
-                for dr, dc in cardinal:
-                    nr, nc = sr + dr, sc + dc
-                    if (0 <= nr < rows and 0 <= nc < cols
-                            and _is_free(nr, nc) and (nr, nc) not in visited):
-                        queue.append((nr, nc))
-                        visited.add((nr, nc))
-
+                for step in steps:
+                    if not blocked[start + step]:
+                        queue.append(start + step)
+                        blocked[start + step] = True
+            frontier_set: set[tuple[int, int]] = set()
             while queue:
-                r, c = queue.popleft()
-                if _is_frontier(r, c):
-                    frontier_set.add((r, c))
-                for dr, dc in cardinal:
-                    nr, nc = r + dr, c + dc
-                    if not (0 <= nr < rows and 0 <= nc < cols):
-                        continue
-                    if (nr, nc) in visited:
-                        continue
-                    if _is_free(nr, nc):
-                        visited.add((nr, nc))
-                        queue.append((nr, nc))
-
+                i = queue.popleft()
+                if front[i]:
+                    frontier_set.add((i // width - 1, i % width - 1))
+                for step in steps:
+                    j = i + step
+                    if not blocked[j]:
+                        blocked[j] = True
+                        queue.append(j)
             return list(frontier_set)
 
     # ── Fallback: global scan (no robot position available) ─────────────
-    frontiers: list[tuple[int, int]] = []
-    for r in range(rows):
-        for c in range(cols):
-            if _is_free(r, c) and _is_frontier(r, c):
-                frontiers.append((r, c))
-    return frontiers
+    return [(int(r), int(c)) for r, c in np.argwhere(free & is_frontier)]
+
+
+def _frontier_mask(grid: np.ndarray) -> np.ndarray:
+    """Cells with an UNCERTAIN cardinal neighbour and no WALL in the 5x5 window.
+
+    Vectorised equivalent of the per-cell test ``find_frontiers`` documents:
+    the centre cell is excluded from the wall window, out-of-grid cells count
+    as neither uncertain nor wall.
+    """
+    rows, cols = grid.shape
+    uncertain = np.pad((grid >= FRONTIER_MIN) & (grid <= FRONTIER_MAX), 1)
+    has_uncertain = (uncertain[:-2, 1:-1] | uncertain[2:, 1:-1]
+                     | uncertain[1:-1, :-2] | uncertain[1:-1, 2:])
+    wall = grid >= WALL_MIN
+    padded = np.pad(wall, 2).astype(np.int8)
+    wall_count = np.zeros(grid.shape, dtype=np.int8)
+    for dr in range(5):
+        for dc in range(5):
+            wall_count += padded[dr:dr + rows, dc:dc + cols]
+    return has_uncertain & (wall_count - wall == 0)
 
 
 def find_groups(frontiers: list[tuple[int, int]]) -> list[list[tuple[int, int]]]:
@@ -338,30 +325,45 @@ def free_space_parents(
     else:
         roots = [(sr + dr, sc + dc) for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1))
                  if 0 <= sr + dr < rows and 0 <= sc + dc < cols and free[sr + dr, sc + dc]]
-    dist: dict[tuple[int, int], float] = {}
-    heap: list[tuple[float, tuple[int, int]]] = []
+    # Flat-index Dijkstra on lists: same relaxation order and tie-breaking
+    # (heap items are (cost, row-major index) like (cost, (row, col))) as the
+    # dict version, just without per-cell tuple hashing.
+    free_flat = free.ravel().tolist()
+    factor_flat = factor.ravel().tolist()
+    dist = [math.inf] * (rows * cols)
+    parent = [-1] * (rows * cols)
+    heap: list[tuple[float, int]] = []
     for root in roots:
         parents[root] = None
-        dist[root] = 0.0
-        heap.append((0.0, root))
+        idx = root[0] * cols + root[1]
+        dist[idx] = 0.0
+        heap.append((0.0, idx))
     heapq.heapify(heap)
-    done: set[tuple[int, int]] = set()
+    done = [False] * (rows * cols)
+    moves = [(dr, dc, dr * cols + dc, _SQRT2 if dr and dc else 1.0) for dr, dc in _STEPS_8]
     while heap:
-        d, (r, c) = heapq.heappop(heap)
-        if (r, c) in done:
+        d, i = heapq.heappop(heap)
+        if done[i]:
             continue
-        done.add((r, c))
-        for dr, dc in _STEPS_8:
+        done[i] = True
+        r, c = divmod(i, cols)
+        for dr, dc, off, cost in moves:
             nr, nc = r + dr, c + dc
-            if not (0 <= nr < rows and 0 <= nc < cols) or not free[nr, nc]:
+            if not (0 <= nr < rows and 0 <= nc < cols):
                 continue
-            if dr and dc and not (free[r + dr, c] and free[r, c + dc]):
+            j = i + off
+            if not free_flat[j]:
                 continue
-            nd = d + (_SQRT2 if dr and dc else 1.0) * factor[nr, nc]
-            if nd < dist.get((nr, nc), math.inf):
-                dist[nr, nc] = nd
-                parents[nr, nc] = (r, c)
-                heapq.heappush(heap, (nd, (nr, nc)))
+            if dr and dc and not (free_flat[i + dr * cols] and free_flat[i + dc]):
+                continue
+            nd = d + cost * factor_flat[j]
+            if nd < dist[j]:
+                dist[j] = nd
+                parent[j] = i
+                heapq.heappush(heap, (nd, j))
+    for j, p in enumerate(parent):
+        if p >= 0:
+            parents[divmod(j, cols)] = divmod(p, cols)
     return parents
 
 

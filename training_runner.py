@@ -149,6 +149,27 @@ def _parse_coverage(reason: str) -> float | None:
     return float(m.group(1)) / 100.0 if m else None
 
 
+def keep_world_for_rerun(world_file: Path) -> Path | None:
+    """Copy a world (SDF + metadata sidecar) into ``worlds/`` unless it is already there.
+
+    Called for ``exhausted`` episodes so they can be replayed later with
+    ``--world worlds/<id>.sdf`` even if the run was started without
+    ``--save-worlds``. Returns the saved path, or ``None`` if copying failed.
+    """
+    try:
+        WORLDS_DIR.mkdir(parents=True, exist_ok=True)
+        target = WORLDS_DIR / world_file.name
+        if target.resolve() != world_file.resolve():
+            shutil.copy2(world_file, target)
+            meta = world_file.with_suffix('.meta.json')
+            if meta.exists():
+                shutil.copy2(meta, target.with_suffix('.meta.json'))
+        return target
+    except OSError as exc:
+        print(f'[runner] WARNING: could not keep world {world_file}: {exc}', file=sys.stderr)
+        return None
+
+
 def make_result_path(mode: str, run_id: str) -> Path:
     """Build the per-run CSV path: results/<dd-mm-yyyy>-<mode>-<id>.csv"""
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
@@ -389,6 +410,10 @@ def run(
         stats.append({'episode': episode, 'reason': reason, 'elapsed': elapsed})
 
         kill_launch(proc)
+        if reason.startswith('exhausted'):
+            kept = keep_world_for_rerun(world_file)
+            if kept is not None:
+                print(f'[runner] Exhausted – world kept for re-run: {kept}')
         append_result(result_file, episode, mode, reason, elapsed, world_file,
                       wall_s=wall_s, sim_speed=sim_speed)
         print(f'[runner] Result appended to {result_file}')
@@ -404,6 +429,8 @@ def run(
     print(f'  Timeouts  : {timeouts}/{len(stats)}')
     stuck = sum(1 for s in stats if 'stuck' in s['reason'])
     print(f'  Stuck     : {stuck}/{len(stats)}')
+    exhausted = sum(1 for s in stats if s['reason'].startswith('exhausted'))
+    print(f'  Exhausted : {exhausted}/{len(stats)}')
     coverages = [_parse_coverage(s['reason']) for s in stats if _parse_coverage(s['reason']) is not None]
     if coverages:
         print(f'  Avg coverage: {sum(coverages)/len(coverages):.1%}')

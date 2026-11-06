@@ -54,12 +54,10 @@ Three ament_python packages in `src/`; the per-file index is the code map in `RE
 (so `world_size` is resolved; skipped if env `SLAM_WORLD_FILE` is set) → gz server (+GUI unless
 headless) + global `/clock` bridge → **per robot `r1`, `r2`** the pre-Nav2 phase in parallel:
 spawn + gz bridge + `cmd_vel_relay` → 2 s RSP → 5 s Cartographer → 6 s startup spin
-(12.5 s @0.5 rad/s, ~1 turn). **Nav2 runs near-parallel per robot but with a small configure
-offset**: r1's Nav2 at `NAV2_BASE_DELAY` (6 s, right after Cartographer sets up map→odom), r2's at
-+`NAV2_CONFIGURE_OFFSET` (4 s → 10 s) so their lifecycle *configure* phases never issue change_state
-concurrently — that overlap was the sole cause of r2's intermittent change_state stall, and it is
-only the first few seconds of each bringup (the earlier fully-serial design needlessly delayed r2
-~25 s). Nav2 comes up via `nav2_slim.launch.py` (not upstream `navigation_launch.py`): only the 5
+(12.5 s @0.5 rad/s, ~1 turn). **Nav2 comes up strictly one robot after the other**: r1's at `NAV2_BASE_DELAY` (6 s, right after
+Cartographer sets up map→odom), r2's when r1's `nav2_gate` exits (r1 fully active). Concurrent lifecycle
+`change_state` calls lose a service response and hang the later robot's bringup (r2 stuck in
+"Configuring planner_server"); a fixed 4 s stagger was not enough under load. Nav2 comes up via `nav2_slim.launch.py` (not upstream `navigation_launch.py`): only the 5
 nodes the explorer uses are lifecycle-managed — `controller_server`, `planner_server`,
 `behavior_server`, `bt_navigator`, `velocity_smoother`; `smoother_server`/`route_server`/
 `collision_monitor`/`waypoint_follower`/`docking_server` are dropped for faster activation
@@ -82,7 +80,8 @@ The explorer base node feeds its TF buffer from each `/<ns>/tf[_static]` directl
 `/tf_static` for the `map→<ns>/map` offsets), so poses resolve headless without the viz-only
 `tf_relay`, and it dispatches every goal in the robot's own `<ns>/map` frame (Nav2 resolves it to `map` via TF).
 Nav2's global costmap (`static_layer`) and `bt_navigator` use the **merged `/map`** in frame `map`
-(`namespace_nav2_params(..., merged_frame)`; a non-rolling static layer does not transform frames), so
+(`namespace_nav2_params(..., merged_frame)`; a non-rolling static layer does not transform frames; inflation is
+relaxed to 0.30 m so the 1.1 m doors stay passable), so
 robots can plan into areas only the teammate mapped. For that, `map → <ns>/map` is also published on
 each `/<ns>/tf_static`.
 
@@ -108,7 +107,9 @@ it is first "popped outward" `GOAL_CLEARANCE_M` away from the frontier line (alo
 a method can override `select_goals(merged_map, [RobotState]) -> {ns: Goal|None}`
 (a `Goal` of `None` = leave the robot as is). The base subscribes to the merged `/map`, looks up each
 robot pose, calls `select_goals` every 2 s, dispatches to `/<ns>/navigate_to_pose`, and supervises
-goals (cancel after `goal_timeout` 45 s, or `no_progress_timeout` 8 s without `progress_step` 0.1 m).
+goals (cancel after `goal_timeout` 45 s, or `no_progress_timeout` 8 s without `progress_step` 0.1 m). A stalled goal also triggers
+`_recover` (escalating: clear costmaps → back up 0.3 m → spin 90°, repeating until a goal succeeds), during which
+the robot gets no new goal.
 On every merged-`/map` update it also publishes the union of per-robot frontiers/centroids (plus each
 active goal) as a `MarkerArray` on `/frontiers_viz` for RViz (`frontier_viz.py`), independent of goal
 state and of the chosen method.
@@ -126,7 +127,10 @@ and saves/trains on disk unless pointed at a throwaway `$SLAM_RL_DATA_DIR`.
 
 **Coverage / episode end** (`episode_manager.py` on the merged `/map`): coverage = known-free cells
 (0–25) / expected free cells, capped at 1.0. Episode ends on coverage ≥ threshold, <0.5 % gained in
-90 s (`stuck`), or the size-derived timeout. First 15 s of `/map` ignored (stale TRANSIENT_LOCAL).
+90 s (`stuck`), the size-derived timeout, or **`exhausted`**: the explorer base sees every robot without an active
+goal for `exhausted_idle_s` (15 sim-s) after at least one dispatch, i.e. the method has nothing left to assign. The
+explorer writes `exhausted (coverage=…%)` into the episode file (episode_manager never overwrites an existing file);
+`training_runner.py` then copies the world (+ `.meta.json`) into `worlds/` so it can be replayed with `--world`. First 15 s of `/map` ignored (stale TRANSIENT_LOCAL).
 
 ## World generator (`utils.py::generate_random_world`)
 

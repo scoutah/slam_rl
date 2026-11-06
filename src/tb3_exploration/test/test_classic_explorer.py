@@ -12,7 +12,11 @@ from rclpy.task import Future
 from rclpy.time import Time
 
 from tb3_exploration.multi_robot_explorer import ClassicExplorer
-from tb3_slam.multi_robot_explorer import candidates_for_robot, RobotState
+from tb3_slam.multi_robot_explorer import (
+    candidates_for_robot,
+    frontier_analysis,
+    RobotState,
+)
 
 
 def _map():
@@ -116,6 +120,17 @@ def test_candidates_preserve_frontier_identity_across_robot_approaches():
         assert candidates
         assert all(len(c.frontier_cells) == c.group_size for c in candidates)
         assert all(c.frontier_cells for c in candidates)
+
+
+def test_frontier_analysis_is_shared_per_map_and_cell():
+    msg = _map()
+    first = frontier_analysis(msg, (20, 30))
+    assert frontier_analysis(msg, (20, 30)) is first
+    assert frontier_analysis(msg, (20, 31)) is not first
+    assert frontier_analysis(_map(), (20, 30)) is not first
+    # Candidates are rebuilt from the shared analysis, never aliasing it.
+    robot = RobotState('r1', 1.25, 1.0)
+    assert candidates_for_robot(msg, robot) == candidates_for_robot(msg, robot)
 
 
 def test_plans_are_serial_per_robot_and_navigation_waits_for_confirmed_costs(explorer):

@@ -13,14 +13,18 @@ from dataclasses import dataclass
 import math
 import os
 from pathlib import Path
+import time
 
 from action_msgs.msg import GoalStatus
-from geometry_msgs.msg import PoseStamped
-from nav2_msgs.action import ComputePathToPose, NavigateToPose
+from builtin_interfaces.msg import Duration
+from geometry_msgs.msg import Point, PoseStamped
+from nav2_msgs.action import BackUp, ComputePathToPose, NavigateToPose, Spin
+from nav2_msgs.srv import ClearEntireCostmap
 from nav_msgs.msg import OccupancyGrid
 import rclpy
 from rclpy.action import ActionClient
 from rclpy.action.client import ClientGoalHandle
+from rclpy.client import Client
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from rclpy.task import Future
@@ -98,13 +102,40 @@ class FrontierCandidate:
     frontier_cells: frozenset[tuple[int, int]] = frozenset()
 
 
+# Last few frontier analyses, keyed by (map message identity, robot cell). The RViz
+# markers and the goal selection analyse the same merged map for the same idle
+# robot; the pipeline is pure Python and costly, so it runs once. Map messages are
+# treated as immutable; the cache holds a reference so an id is never reused.
+_ANALYSIS_CACHE_SIZE = 4
+_analysis_cache: dict[tuple[int, tuple[int, int] | None], tuple[OccupancyGrid, tuple]] = {}
+
+
+def frontier_analysis(
+    merged_map: OccupancyGrid,
+    robot_grid_pos: tuple[int, int] | None,
+) -> tuple[list[tuple[int, int]], dict]:
+    """``centroids_from_map_debug`` memoised per map message and robot cell.
+
+    The returned centroids/stats are shared between callers: do not mutate them.
+    """
+    key = (id(merged_map), robot_grid_pos)
+    hit = _analysis_cache.get(key)
+    if hit is not None:
+        return hit[1]
+    result = centroids_from_map_debug(merged_map, robot_grid_pos=robot_grid_pos)
+    if len(_analysis_cache) >= _ANALYSIS_CACHE_SIZE:
+        del _analysis_cache[next(iter(_analysis_cache))]    # oldest first
+    _analysis_cache[key] = (merged_map, result)
+    return result
+
+
 def candidates_for_robot(
     merged_map: OccupancyGrid,
     robot: RobotState,
 ) -> list[FrontierCandidate]:
     """Navigable frontier centroids reachable from ``robot`` on the merged map."""
     robot_grid_pos = world_to_grid(robot.x, robot.y, merged_map)
-    centroids, stats = centroids_from_map_debug(merged_map, robot_grid_pos=robot_grid_pos)
+    centroids, stats = frontier_analysis(merged_map, robot_grid_pos)
     sizes = stats.get('centroid_group_sizes', [])
     candidates: list[FrontierCandidate] = []
     for i, cell in enumerate(centroids):
@@ -117,6 +148,27 @@ def candidates_for_robot(
     return candidates
 
 
+class IdleTracker:
+    """How long the whole team has been without any active goal (sim seconds).
+
+    Feeds the ``exhausted`` verdict: if no robot is navigating or recovering for
+    a while although coverage is short of the threshold, the strategy has no
+    assignable frontier left and more waiting will not add progress.
+    """
+
+    def __init__(self) -> None:
+        self._idle_since: float | None = None
+
+    def update(self, busy: bool, now: float) -> float:
+        """Record the team state at ``now``; return seconds idle so far (0 if busy)."""
+        if busy:
+            self._idle_since = None
+            return 0.0
+        if self._idle_since is None:
+            self._idle_since = now
+        return now - self._idle_since
+
+
 @dataclass
 class _RobotIO:
     ns: str
@@ -124,6 +176,10 @@ class _RobotIO:
     map_frame: str
     nav_client: ActionClient
     path_client: ActionClient
+    backup_client: ActionClient
+    spin_client: ActionClient
+    clear_local: Client
+    clear_global: Client
     goal_active: bool = False
     goal_handle: ClientGoalHandle | None = None
     goal_generation: int = 0
@@ -132,6 +188,10 @@ class _RobotIO:
     dispatch_time: float | None = None
     last_progress_pos: tuple[float, float] | None = None
     last_progress_time: float | None = None
+    # Consecutive stalled goals without a success; drives the escalating recovery.
+    stall_streak: int = 0
+    recovering: bool = False
+    recovery_deadline: float = 0.0
 
 
 class MultiRobotExplorerNode(Node):
@@ -148,8 +208,14 @@ class MultiRobotExplorerNode(Node):
         self.declare_parameter('no_progress_timeout', 8.0)
         self.declare_parameter('progress_step', 0.1)
         self.declare_parameter('min_progress', 0.2)
+        self.declare_parameter('recovery_timeout', 10.0)
+        # Team idle this long (sim s) before any goal was ever assigned again =>
+        # episode ends as "exhausted". 0 disables. Must stay below the episode
+        # manager's stuck window (90 s) minus the time a last goal can still run.
+        self.declare_parameter('exhausted_idle_s', 15.0)
         self.declare_parameter('data_dir', os.environ.get('SLAM_RL_DATA_DIR', ''))
         self.declare_parameter('cost_cache_ttl', 5.0)
+        self.declare_parameter('viz_min_period', 2.0)
 
         self._coverage_threshold: float = self.get_parameter('coverage_threshold').value
         self._episode_file: str = self.get_parameter('episode_file').value
@@ -158,8 +224,15 @@ class MultiRobotExplorerNode(Node):
         self._no_progress_timeout: float = self.get_parameter('no_progress_timeout').value
         self._progress_step: float = self.get_parameter('progress_step').value
         self._min_progress: float = self.get_parameter('min_progress').value
+        self._recovery_timeout: float = self.get_parameter('recovery_timeout').value
+        self._exhausted_idle_s: float = self.get_parameter('exhausted_idle_s').value
+        self._idle = IdleTracker()
+        self._ever_dispatched = False
+        self._coverage = 0.0
         self._data_dir: str = self.get_parameter('data_dir').value
         self._cost_cache_ttl: float = self.get_parameter('cost_cache_ttl').value
+        self._viz_min_period: float = self.get_parameter('viz_min_period').value
+        self._viz_last_wall = -math.inf
 
         self._coverage_done = False
         self._latest_map: OccupancyGrid | None = None
@@ -180,6 +253,12 @@ class MultiRobotExplorerNode(Node):
                 path_client=ActionClient(
                     self, ComputePathToPose, topic(ns, 'compute_path_to_pose')
                 ),
+                backup_client=ActionClient(self, BackUp, topic(ns, 'backup')),
+                spin_client=ActionClient(self, Spin, topic(ns, 'spin')),
+                clear_local=self.create_client(
+                    ClearEntireCostmap, topic(ns, 'local_costmap/clear_entirely_local_costmap')),
+                clear_global=self.create_client(
+                    ClearEntireCostmap, topic(ns, 'global_costmap/clear_entirely_global_costmap')),
             )
 
         expected = load_expected_cells()
@@ -208,6 +287,7 @@ class MultiRobotExplorerNode(Node):
         self.create_timer(self.get_parameter('decision_period').value, self._decide)
         self.create_timer(1.0, self._supervise_goals)
         self.create_timer(1.0, self._watch_episode_end)
+        self.create_timer(1.0, self._check_exhausted)
 
         self.get_logger().info(f'{node_name} ready – waiting for merged /map ...')
 
@@ -293,6 +373,7 @@ class MultiRobotExplorerNode(Node):
         if self._coverage_done or self._expected_cells <= 0:
             return
         coverage, _known = check_coverage(msg, self._expected_cells)
+        self._coverage = coverage
         if coverage >= self._coverage_threshold:
             self._finish(coverage)
 
@@ -301,7 +382,17 @@ class MultiRobotExplorerNode(Node):
 
         Each robot's active goal is drawn in that robot's RViz colour (r1 green,
         r2 orange) so the two goals are distinguishable.
+
+        Display only, so it costs nothing without a subscriber and is rate
+        limited (wall clock, ``viz_min_period``) otherwise: at higher sim speed
+        maps arrive faster than the pipeline can analyse them.
         """
+        if self._viz_pub.get_subscription_count() == 0:
+            return
+        wall = time.monotonic()
+        if wall - self._viz_last_wall < self._viz_min_period:
+            return
+        self._viz_last_wall = wall
         frontier_cells: set[tuple[int, int]] = set()
         centroid_cells: set[tuple[int, int]] = set()
         extra_goals: list[
@@ -315,9 +406,7 @@ class MultiRobotExplorerNode(Node):
             robot_grid_pos = world_to_grid(pos[0], pos[1], msg)
             if robot_grid_pos is None:
                 continue
-            centroids, stats = centroids_from_map_debug(
-                msg, robot_grid_pos=robot_grid_pos,
-            )
+            centroids, stats = frontier_analysis(msg, robot_grid_pos)
             frontier_cells.update(stats['frontiers'])
             centroid_cells.update(centroids)
             goal_cell: tuple[int, int] | None = None
@@ -366,7 +455,7 @@ class MultiRobotExplorerNode(Node):
                 name=ns,
                 x=pos[0],
                 y=pos[1],
-                busy=io.goal_active,
+                busy=io.goal_active or io.recovering,
                 current_goal=io.current_goal,
             ))
 
@@ -479,6 +568,8 @@ class MultiRobotExplorerNode(Node):
     def _dispatch(
         self, io: _RobotIO, goal: Goal, robot_pos: tuple[float, float] | None,
     ) -> None:
+        if io.recovering:
+            return      # a recovery behaviour owns the drive; the strategy retries next cycle
         if not io.nav_client.server_is_ready():
             self.get_logger().warning(
                 f'[{io.ns}] Nav2 not ready – skipping dispatch', throttle_duration_sec=5.0,
@@ -490,6 +581,7 @@ class MultiRobotExplorerNode(Node):
             return
 
         now = self.get_clock().now().nanoseconds * 1e-9
+        self._ever_dispatched = True
         io.goal_active = True
         io.current_goal = goal
         io.dispatch_pos = robot_pos
@@ -552,6 +644,7 @@ class MultiRobotExplorerNode(Node):
                     f'(< {self._min_progress}m)'
                 )
             else:
+                io.stall_streak = 0
                 self.get_logger().info(f'[{ns}] SUCCEEDED moved={moved_str}')
         elif status == GoalStatus.STATUS_ABORTED:
             self.get_logger().warning(
@@ -586,6 +679,8 @@ class MultiRobotExplorerNode(Node):
             return
         now = self.get_clock().now().nanoseconds * 1e-9
         for io in self._robots.values():
+            if io.recovering and now > io.recovery_deadline:
+                io.recovering = False       # watchdog: behaviour result never arrived
             if not io.goal_active or io.dispatch_time is None:
                 continue
             pos = self._robot_pos(io)
@@ -601,8 +696,84 @@ class MultiRobotExplorerNode(Node):
             )
             if stalled or elapsed > self._goal_timeout:
                 reason = 'NO PROGRESS' if stalled else 'TIMEOUT'
-                self.get_logger().warning(f'[{io.ns}] {reason} after {elapsed:.0f}s')
+                self.get_logger().warning(
+                    f'[{io.ns}] {reason} after {elapsed:.0f}s{self._stall_context(io, pos)}')
                 self._cancel_goal(io, reason=reason)
+                if stalled:
+                    self._recover(io)
+
+    def _recover(self, io: _RobotIO) -> None:
+        """Escalating self-rescue so a stalled robot never just sits there.
+
+        Always clears both costmaps (stale/phantom obstacles). On the 2nd stall in
+        a row it also backs up, on the 3rd it spins, then the cycle repeats until
+        a goal succeeds again (``stall_streak`` reset). While a behaviour runs
+        ``io.recovering`` blocks new goals so Nav2 and the behaviour server do
+        not fight over ``cmd_vel``.
+        """
+        io.stall_streak += 1
+        step = io.stall_streak % 3
+        self._clear_costmaps(io)
+        if step == 1:
+            self.get_logger().info(
+                f'[{io.ns}] recovery #{io.stall_streak}: cleared costmaps')
+            return
+        if step == 2:
+            client, goal, name = io.backup_client, BackUp.Goal(), 'back up'
+            goal.target = Point(x=0.3)
+            goal.speed = 0.1
+            goal.time_allowance = Duration(sec=8)
+        else:
+            client, goal, name = io.spin_client, Spin.Goal(), 'spin'
+            goal.target_yaw = 1.57
+            goal.time_allowance = Duration(sec=8)
+        if not client.server_is_ready():
+            return
+        self.get_logger().info(f'[{io.ns}] recovery #{io.stall_streak}: {name}')
+        io.recovering = True
+        io.recovery_deadline = self.get_clock().now().nanoseconds * 1e-9 + self._recovery_timeout
+        client.send_goal_async(goal).add_done_callback(
+            lambda f, n=io.ns: self._on_recovery_response(f, n))
+
+    def _clear_costmaps(self, io: _RobotIO) -> None:
+        for client in (io.clear_local, io.clear_global):
+            if client.service_is_ready():
+                client.call_async(ClearEntireCostmap.Request())
+
+    def _on_recovery_response(self, future: Future, ns: str) -> None:
+        io = self._robots[ns]
+        try:
+            handle: ClientGoalHandle = future.result()
+        except Exception:  # noqa: BLE001
+            handle = None
+        if handle is None or not handle.accepted:
+            io.recovering = False
+            return
+        handle.get_result_async().add_done_callback(
+            lambda f, n=ns: self._on_recovery_done(f, n))
+
+    def _on_recovery_done(self, future: Future, ns: str) -> None:
+        io = self._robots[ns]
+        io.recovering = False
+        try:
+            self.get_logger().info(
+                f'[{ns}] recovery finished status={future.result().status}')
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _stall_context(self, io: _RobotIO, pos: tuple[float, float] | None) -> str:
+        """Where the robot, its goal and its teammates were when a goal was abandoned."""
+        if pos is None:
+            return ''
+        text = f' at ({pos[0]:.2f}, {pos[1]:.2f})'
+        if io.current_goal is not None:
+            text += f' goal=({io.current_goal.x:.2f}, {io.current_goal.y:.2f})'
+        for other in self._robots.values():
+            other_pos = self._robot_pos(other) if other is not io else None
+            if other_pos is not None:
+                text += (f' {other.ns}=({other_pos[0]:.2f}, {other_pos[1]:.2f}) '
+                         f'{math.dist(pos, other_pos):.2f}m away')
+        return text
 
     def _progress_since_dispatch(self, io: _RobotIO) -> float | None:
         if io.dispatch_pos is None:
@@ -612,10 +783,37 @@ class MultiRobotExplorerNode(Node):
             return None
         return math.hypot(now[0] - io.dispatch_pos[0], now[1] - io.dispatch_pos[1])
 
+    def _check_exhausted(self) -> None:
+        """End the episode as ``exhausted`` once the team has nothing left to do.
+
+        Distinct from ``stuck`` (coverage stagnates, robots may still be trying):
+        here every robot has been idle for ``exhausted_idle_s`` because the
+        strategy assigns no goal any more, so the remaining unknown area is out
+        of reach for this method. Saved worlds of such episodes are the ones worth
+        re-running (see ``training_runner.py``).
+        """
+        if (self._coverage_done or self._exhausted_idle_s <= 0 or not self._ever_dispatched
+                or self._latest_map is None or self._expected_cells <= 0):
+            return
+        now = self.get_clock().now().nanoseconds * 1e-9
+        busy = any(io.goal_active or io.recovering for io in self._robots.values())
+        if self._idle.update(busy, now) < self._exhausted_idle_s:
+            return
+        self.get_logger().info(
+            f'[coverage] EXHAUSTED at {self._coverage:.1%}: no goal assigned for '
+            f'{self._exhausted_idle_s:.0f}s'
+        )
+        self._coverage_done = True
+        self._write_episode_file(f'exhausted (coverage={self._coverage:.1%})')
+
+    def _write_episode_file(self, text: str) -> None:
+        """Write the episode-end file unless one (e.g. from episode_manager) exists."""
+        if self._episode_file and not Path(self._episode_file).exists():
+            Path(self._episode_file).write_text(text)
+
     def _finish(self, coverage: float) -> None:
         self.get_logger().info(
             f'[coverage] TARGET REACHED {coverage:.1%} >= {self._coverage_threshold:.0%}'
         )
         self._coverage_done = True
-        if self._episode_file:
-            Path(self._episode_file).write_text(f'coverage={coverage:.1%}')
+        self._write_episode_file(f'coverage={coverage:.1%}')

@@ -37,7 +37,7 @@ TRAIN_WORLD_SIZE = 8.0   # the RL policy is trained on this edge length (in-dist
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 RESULTS_DIR = PROJECT_ROOT / 'results'
-WORLDS_DIR = PROJECT_ROOT / 'worlds'
+WORLDS_DIR = PROJECT_ROOT / 'worlds'   # overridden by --worlds-dir
 
 # ROS node name substrings whose log lines are suppressed in the terminal
 LOG_FILTER: list[str] = [
@@ -472,6 +472,7 @@ def run(
 # ---------------------------------------------------------------------------
 
 def main() -> None:
+    global WORLDS_DIR
     parser = argparse.ArgumentParser(description='Episodic SLAM training runner')
     parser.add_argument('--mode', choices=['classic', 'rl'], default='classic',
                         help='Exploration strategy (default: classic)')
@@ -492,6 +493,9 @@ def main() -> None:
                         help='Generate a new random world for each episode')
     parser.add_argument('--save-worlds', action='store_true',
                         help='Persist generated worlds to worlds/ (default: /tmp/)')
+    parser.add_argument('--worlds-dir', type=Path, default=None,
+                        help='Directory for saved worlds (default: worlds/); use e.g. '
+                             'worlds/train_8, worlds/eval_8, worlds/eval_12 to keep sets apart')
     parser.add_argument('--sim-speed', type=float, default=1.0,
                         help='Target Gazebo real-time factor: 1 = real time (default), '
                              '4 = up to 4x faster, 0 = unlimited. The achieved speed is '
@@ -517,6 +521,8 @@ def main() -> None:
         except ValueError as exc:
             parser.error(str(exc))
 
+    if args.worlds_dir:
+        WORLDS_DIR = args.worlds_dir.resolve()
     run_id = uuid.uuid4().hex[:8]
     world_file = prepare_world(args.world, run_id, save=args.save_worlds,
                                world_size=args.world_size, seed=args.seed)

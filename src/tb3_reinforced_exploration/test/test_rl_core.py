@@ -654,3 +654,29 @@ def test_qmix_ignores_old_team_learner_files(tmp_path):
     learner = _learner(tmp_path)
     learner.load()
     assert learner.step_count == 0 and len(learner.replay) == 0
+
+
+def test_qmix_training_log_is_append_only(tmp_path):
+    learner = _learner(tmp_path)
+    learner.log_step(0.5, 0.1)
+    learner.log_step(0.25, 0.2)
+    rows = learner.log_path.read_text().strip().splitlines()
+    assert rows[0] == 'episode,step,loss,epsilon,reward,buffer'
+    assert len(rows) == 3
+    assert rows[1].startswith('1,0,0.5')
+
+
+def test_qmix_snapshots_every_interval_and_frozen_writes_nothing(tmp_path):
+    from tb3_reinforced_exploration.rl_core import SNAPSHOT_INTERVAL
+    learner = _learner(tmp_path)
+    for _ in range(SNAPSHOT_INTERVAL):
+        learner.end_episode()
+    snap = learner.snapshot_dir / f'ep_{SNAPSHOT_INTERVAL:04d}'
+    assert (snap / 'agent.pt').exists() and (snap / 'mixer.pt').exists()
+    assert learner.episode_count == SNAPSHOT_INTERVAL
+
+    frozen = _learner(tmp_path / 'frozen')
+    frozen.freeze()
+    frozen.log_step(1.0, 1.0)
+    assert frozen.save_snapshot() is None
+    assert not (tmp_path / 'frozen').exists()

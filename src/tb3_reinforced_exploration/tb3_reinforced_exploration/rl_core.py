@@ -6,6 +6,8 @@ imported lazily via ``_require_torch``. ``rl_agent`` uses the legacy part.
 from __future__ import annotations
 
 import collections
+import csv
+import json
 import os
 from pathlib import Path
 import pickle
@@ -29,6 +31,12 @@ EPSILON_DECAY = 0.98
 
 TARGET_UPDATE_INTERVAL = 50
 MIN_REPLAY_SIZE = 50
+
+# Training telemetry (QMixLearner): append-only CSV plus versioned weights.
+SNAPSHOT_INTERVAL = 10      # episodes between weight snapshots
+TRAINING_LOG_NAME = 'training_log.csv'
+TRAINING_LOG_FIELDS = ('episode', 'step', 'loss', 'epsilon', 'reward', 'buffer')
+SNAPSHOT_DIR_NAME = 'snapshots'
 
 # Size-invariant normalisation (relative, not absolute coords) so an 8x8-trained
 # policy transfers to the unseen 12x12 world. Single source of truth.
@@ -520,6 +528,7 @@ class QMixLearner:
         self.replay = ReplayBuffer()
         self.epsilon = EPSILON_START
         self.step_count = 0
+        self.episode_count = 0
         self.frozen = False
 
     def freeze(self) -> None:
@@ -553,6 +562,14 @@ class QMixLearner:
     @property
     def meta_path(self) -> Path:
         return self.persist_dir / 'qmix_meta.pkl'
+
+    @property
+    def log_path(self) -> Path:
+        return self.persist_dir / TRAINING_LOG_NAME
+
+    @property
+    def snapshot_dir(self) -> Path:
+        return self.persist_dir / SNAPSHOT_DIR_NAME
 
     # -- persistence ---------------------------------------------------
 
@@ -591,6 +608,7 @@ class QMixLearner:
                 meta = pickle.load(f)
             self.epsilon = meta.get('epsilon', EPSILON_START)
             self.step_count = meta.get('step_count', 0)
+            self.episode_count = meta.get('episode_count', 0)
 
     def _replay_compatible(self) -> bool:
         t = self.replay.sample(1)[0]
@@ -609,7 +627,42 @@ class QMixLearner:
         self.replay.save(self.replay_path)
         with open(self.meta_path, 'wb') as f:
             pickle.dump({'epsilon': self.epsilon,
-                         'step_count': self.step_count}, f)
+                         'step_count': self.step_count,
+                         'episode_count': self.episode_count}, f)
+
+    def log_step(self, loss: float, reward: float) -> None:
+        """Append one telemetry row (episode, step, loss, ε, reward, buffer).
+
+        The file is append-only and survives restarts, so the whole training
+        history stays in one CSV (see tools/plot_training.py). No-op when frozen.
+        """
+        if self.frozen:
+            return
+        self.persist_dir.mkdir(parents=True, exist_ok=True)
+        new = not self.log_path.exists()
+        with open(self.log_path, 'a', newline='') as f:
+            w = csv.writer(f)
+            if new:
+                w.writerow(TRAINING_LOG_FIELDS)
+            w.writerow([self.episode_count + 1, self.step_count, f'{loss:.6f}',
+                        f'{self.epsilon:.5f}', f'{reward:.6f}', len(self.replay)])
+
+    def save_snapshot(self) -> Path | None:
+        """Write versioned weights to ``snapshots/ep_<NNNN>/`` (never overwritten).
+
+        Returns the directory, or ``None`` when frozen.
+        """
+        if self.frozen:
+            return None
+        torch, _ = _require_torch()
+        out = self.snapshot_dir / f'ep_{self.episode_count:04d}'
+        out.mkdir(parents=True, exist_ok=True)
+        torch.save(self.agent_net.state_dict(), out / 'agent.pt')
+        torch.save(self.mixer.state_dict(), out / 'mixer.pt')
+        with open(out / 'meta.json', 'w') as f:
+            json.dump({'episode': self.episode_count, 'step': self.step_count,
+                       'epsilon': self.epsilon}, f)
+        return out
 
     # -- decentralised execution ---------------------------------------
 
@@ -708,3 +761,6 @@ class QMixLearner:
         if self.frozen:
             return
         self.epsilon = decay_epsilon(self.epsilon)
+        self.episode_count += 1
+        if self.episode_count % SNAPSHOT_INTERVAL == 0:
+            self.save_snapshot()

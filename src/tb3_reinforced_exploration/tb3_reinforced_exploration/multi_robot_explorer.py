@@ -263,6 +263,8 @@ class RLExplorer(MultiRobotExplorerNode):
             return
         self._learner.push(t)
         loss = self._learner.train_step()
+        if loss is not None:
+            self._learner.log_step(loss, t.reward)
         if loss is not None and self._learner.step_count % 50 == 0:
             self.get_logger().info(
                 f'[rl] step={self._learner.step_count} loss={loss:.4f} '

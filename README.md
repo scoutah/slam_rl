@@ -93,27 +93,39 @@ mv rl_data rl_data_old
 
 # 1) Training: nur 8x8, Seed 1 (nicht unterbrechen; bei Codeänderung rl_data/ entfernen und neu starten)
 python3 training_runner.py --mode rl --episodes 150 --headless --randomize-worlds \
-    --world-size 8 --seed 1 --save-worlds --sim-speed 4
+    --world-size 8 --seed 1 --save-worlds --worlds-dir worlds/train_8 --sim-speed 4
 
 # 2) Eval 8x8, Seed 2 (gleiche Welten für beide Methoden)
 python3 training_runner.py --mode classic --episodes 30 --headless --randomize-worlds \
-    --world-size 8 --seed 2 --save-worlds
+    --world-size 8 --seed 2 --save-worlds --worlds-dir worlds/eval_8
 python3 training_runner.py --mode rl --eval --episodes 30 --headless --randomize-worlds \
-    --world-size 8 --seed 2 --save-worlds
+    --world-size 8 --seed 2 --save-worlds --worlds-dir worlds/eval_8
 
 # 3) Eval 12x12, Seed 3
 python3 training_runner.py --mode classic --episodes 30 --headless --randomize-worlds \
-    --world-size 12 --seed 3 --save-worlds
+    --world-size 12 --seed 3 --save-worlds --worlds-dir worlds/eval_12
 python3 training_runner.py --mode rl --eval --episodes 30 --headless --randomize-worlds \
-    --world-size 12 --seed 3 --save-worlds
+    --world-size 12 --seed 3 --save-worlds --worlds-dir worlds/eval_12
 
 # 4) Auswertung (nur die Eval-CSVs übergeben, keine Trainings- oder Altläufer)
 python3 tools/analyze_results.py results/*-classic-*.csv results/*-rl-eval-*.csv
 ```
 
-- **Archivierung:** `--save-worlds` legt die Welten unter zufälligen IDs in `worlds/` ab. Nach
-  jedem Lauf in getrennte Ordner verschieben (`worlds/train_8/`, `worlds/eval_8/`,
-  `worlds/eval_12/`); die Seeds erzeugen sie ohnehin reproduzierbar neu.
+- **Archivierung:** `--save-worlds --worlds-dir <Ordner>` legt die Welten (SDF + `.meta.json`) unter
+  zufälligen IDs im jeweiligen Ordner ab: `worlds/train_8/`, `worlds/eval_8/`, `worlds/eval_12/`
+  (getrennt, damit ID/OOD nachvollziehbar bleibt). Die Seeds erzeugen sie zudem reproduzierbar neu;
+  Replay einer gespeicherten Welt: `--world worlds/eval_12/<id>.sdf`. Zum Archivieren
+  `results/`, `worlds/` und `rl_data/` (inkl. `training_log.csv`, `snapshots/`) zusammen sichern.
+- **Nur 8 × 8 gesehen:** Das Training läuft ausschließlich mit `--world-size 8` (`worlds/train_8/`
+  enthält nur 8-m-Welten, prüfbar über die `.meta.json`); die Evaluation lädt das Modell eingefroren
+  (`--eval`, `rl_data/` bleibt unverändert, `snapshots/` und `training_log.csv` wachsen nicht).
+- **Trainingsverlauf:** Beim Training schreibt der RL-Explorer in `rl_data/` (bzw. `$SLAM_RL_DATA_DIR`)
+  `training_log.csv` (append-only: `episode, step, loss, epsilon, reward, buffer` je Gradientenschritt)
+  und alle 10 Episoden versionierte Gewichte `snapshots/ep_NNNN/{agent.pt,mixer.pt,meta.json}`.
+  Darstellen: `python3 tools/plot_training.py [rl_data]` (matplotlib; Schnappschüsse zusätzlich torch)
+  schreibt nach `rl_data/plots/` `learning_curves.png` (Loss/Reward/ε) und `snapshot_progression.png`
+  + `snapshots.csv` (Korrelation von Q mit jedem Beobachtungsfeature auf einem festen Probe-Set und
+  Gewichtsabstand zum vorigen Schnappschuss).
 - **CSV-Auswahl:** Trainingsläufe heißen `…-rl-…` und gehören nicht in die Auswertung. Fehlgeschlagene
   oder alte Classic-CSVs vorher aus `results/` entfernen oder die Dateien einzeln angeben.
 - **Ausgabe:** `results/analysis/` mit `summary.csv`, `ratio.csv`, `ratio_change.csv` und den Plots
@@ -193,7 +205,7 @@ Begründungen stehen als kurzer Kommentar im Code.
 | Datei | Inhalt |
 |---|---|
 | `tb3_reinforced_exploration/multi_robot_explorer.py` | `RLExplorer`: überschreibt `select_goals` (dezentrale Runde mit Intents), zeichnet gemeinsame Ereignisse auf, trainiert online, speichert am Episodenende. |
-| `tb3_reinforced_exploration/rl_core.py` | ROS-freier Kern: lokale Beobachtung (5 Features) und globaler Zustand (4), Intent-Filter, `decentralised_round`, Reward, ε-Decay pro Episode, Replay, `QMixLearner` (`agent.pt`, `mixer.pt`, `joint_replay.pkl`, `qmix_meta.pkl`), `resolve_persist_dir`. Torch lazy. Enthält auch den alten DQN-Teil für `rl_agent`. |
+| `tb3_reinforced_exploration/rl_core.py` | ROS-freier Kern: lokale Beobachtung (5 Features) und globaler Zustand (4), Intent-Filter, `decentralised_round`, Reward, ε-Decay pro Episode, Replay, `QMixLearner` (`agent.pt`, `mixer.pt`, `joint_replay.pkl`, `qmix_meta.pkl`, dazu `training_log.csv` und `snapshots/ep_NNNN/`), `resolve_persist_dir`. Torch lazy. Enthält auch den alten DQN-Teil für `rl_agent`. |
 | `tb3_reinforced_exploration/rl_agent.py` | Alter Ein-Roboter-DQN-Node (nicht gelauncht). |
 | `test/test_rl_core.py` | Tests des Lernkerns. |
 
@@ -202,6 +214,7 @@ Begründungen stehen als kurzer Kommentar im Code.
 | Datei | Inhalt |
 |---|---|
 | `training_runner.py` | Episoden-Loop: Welt erzeugen/wiederverwenden, Launch mit `SLAM_WORLD_FILE`/`SLAM_SIM_SPEED`, auf `/tmp/slam_episode_done` warten, Prozesse beenden, CSV schreiben (Spalten u. a. `elapsed_s`, `reason`, `world_size`, `distribution` = ID für 8 m / OOD sonst). `--eval` (nur `--mode rl`) startet den RL-Explorer eingefroren, CSV heißt dann `…-rl-eval-…`; `--seed` macht die Weltfolge reproduzierbar. |
+| `tools/plot_training.py` | Liest `rl_data/training_log.csv` und `snapshots/ep_*/`, schreibt nach `rl_data/plots/` Lernkurven (`learning_curves.png`) und die Entwicklung über die Gewichts-Schnappschüsse (`snapshot_progression.png`, `snapshots.csv`). |
 | `tools/analyze_results.py` | Stdlib (+ optional matplotlib): liest Ergebnis-CSVs, schreibt nach `results/analysis/` Tabellen (`summary.csv`, `ratio.csv`, `ratio_change.csv`) und Plots (`completion_time`, `success_rate`, `time_ratio`): Zeit/Erfolgsrate je (Methode, Größe), RL/Classic-Verhältnis je Größe samt Änderung 8→12 (Bootstrap-95 %-KI). |
 | `tools/check_world_connectivity.py` | Offline (numpy): Konnektivität und Spawn-Erreichbarkeit für beide Größen. |
 | `tools/profile_frontiers.py` | Benchmark der Frontier-Pipeline (System-Python, sourced); überschreibt `/tmp/slam_world_meta.json`. |

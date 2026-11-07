@@ -520,6 +520,17 @@ class QMixLearner:
         self.replay = ReplayBuffer()
         self.epsilon = EPSILON_START
         self.step_count = 0
+        self.frozen = False
+
+    def freeze(self) -> None:
+        """Switch to evaluation: greedy policy, no learning, nothing written.
+
+        Call after :meth:`load`. Sets epsilon to 0 and turns :meth:`push`,
+        :meth:`train_step`, :meth:`end_episode` and :meth:`save` into no-ops,
+        so the loaded model and its files stay untouched.
+        """
+        self.frozen = True
+        self.epsilon = 0.0
 
     def _sync_targets(self) -> None:
         self.target_agent_net.load_state_dict(self.agent_net.state_dict())
@@ -589,6 +600,8 @@ class QMixLearner:
 
     def save(self) -> None:
         """Persist agent net, mixer, replay and meta to the persist dir."""
+        if self.frozen:
+            return
         torch, _ = _require_torch()
         self.persist_dir.mkdir(parents=True, exist_ok=True)
         torch.save(self.agent_net.state_dict(), self.agent_path)
@@ -613,8 +626,9 @@ class QMixLearner:
     # -- centralised training ------------------------------------------
 
     def push(self, t: JointTransition) -> None:
-        """Add one joint transition to the replay buffer."""
-        self.replay.push(t)
+        """Add one joint transition to the replay buffer (no-op when frozen)."""
+        if not self.frozen:
+            self.replay.push(t)
 
     def _next_agent_qs(self, batch: list[JointTransition]):
         """[B, n] of max_a' Q_i_target(o'_i, a'); 0 where no candidate exists."""
@@ -642,6 +656,8 @@ class QMixLearner:
         mixer. Returns None until the buffer holds enough samples; epsilon is
         not touched here (see :meth:`end_episode`).
         """
+        if self.frozen:
+            return None
         torch, nn = _require_torch()
         if len(self.replay) < max(MIN_REPLAY_SIZE, BATCH_SIZE):
             return None
@@ -686,6 +702,9 @@ class QMixLearner:
         """Advance the epsilon schedule by one step; call once per episode.
 
         Per-episode (not per-gradient-step) decay keeps exploration high for
-        ≈150 episodes instead of collapsing within the first few.
+        ≈150 episodes instead of collapsing within the first few. No-op when
+        frozen.
         """
+        if self.frozen:
+            return
         self.epsilon = decay_epsilon(self.epsilon)

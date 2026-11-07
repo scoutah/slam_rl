@@ -343,29 +343,34 @@ def map_merge_stack(spawns: list[tuple[float, float]], world_size: float,
     return [*static_tfs, merge]
 
 
-def explorer_node(mode, use_sim_time, coverage_threshold, episode_file) -> Node:
+def explorer_node(mode, use_sim_time, coverage_threshold, episode_file,
+                  rl_eval=False) -> Node:
     """Standalone explorer node for the selected method.
 
     ``classic`` runs the cost-utility explorer in ``tb3_exploration``; ``rl``
     runs the learned explorer in ``tb3_reinforced_exploration``. Each is its own
     node reading the merged global ``/map`` and dispatching goals to the
     per-robot ``/<ns>/navigate_to_pose`` actions; the methods share only the
-    infrastructure in the base node, not a strategy.
+    infrastructure in the base node, not a strategy. ``rl_eval`` runs the RL
+    explorer with a frozen, greedy model (no learning, nothing saved).
     """
     package, executable = {
         'classic': ('tb3_exploration', 'classic_explorer'),
         'rl': ('tb3_reinforced_exploration', 'rl_explorer'),
     }[mode]
+    params = {
+        'use_sim_time': use_sim_time,
+        'coverage_threshold': coverage_threshold,
+        'episode_file': episode_file,
+    }
+    if mode == 'rl':
+        params['eval_mode'] = rl_eval
     return Node(
         package=package,
         executable=executable,
         name=f'{mode}_explorer',
         ros_arguments=['--log-level', 'info'],
-        parameters=[{
-            'use_sim_time': use_sim_time,
-            'coverage_threshold': coverage_threshold,
-            'episode_file': episode_file,
-        }],
+        parameters=[params],
     )
 
 
@@ -377,6 +382,7 @@ def generate_launch_description():
     exploration_mode = LaunchConfiguration('exploration_mode', default='classic')
     episode_file = LaunchConfiguration('episode_file', default='/tmp/slam_episode_done')
     coverage_threshold = LaunchConfiguration('coverage_threshold', default='0.97')
+    rl_eval = LaunchConfiguration('rl_eval', default='false')
     world_size = LaunchConfiguration('world_size', default=str(DEFAULT_WORLD_SIZE))
 
     ros_gz_sim = get_package_share_directory('ros_gz_sim')
@@ -542,6 +548,7 @@ def generate_launch_description():
         if mode in ('classic', 'rl'):
             return [explorer_node(
                 mode, use_sim_time, coverage_threshold, episode_file,
+                rl_eval.perform(context).lower() == 'true',
             )]
         if mode == 'none':
             return []

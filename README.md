@@ -42,12 +42,15 @@ dessen `site-packages` an den `PYTHONPATH`.
 ```bash
 # exploration_mode: classic (Standard) | rl | none (nackter Stack, Ziele von außen)
 ros2 launch tb3_slam sim_slam.launch.py exploration_mode:=classic
-# weitere Args: headless:=true, rviz:=false, world_size:=8|12, coverage_threshold:=0.97
+# weitere Args: headless:=true, rviz:=false, world_size:=8|12, coverage_threshold:=0.97,
+# rl_eval:=true (nur rl: eingefrorenes Modell, ε=0, kein Lernen/Speichern)
 
 # Episodisches Training (alle Optionen: --help)
 python3 training_runner.py --mode classic --episodes 20 --headless --randomize-worlds --world-size 12
 python3 training_runner.py --mode rl --episodes 50 --headless --sim-speed 4
 python3 training_runner.py --world worlds/<id>.sdf --episodes 5     # gespeicherte Welt
+
+# Evaluation (Training → Vergleich): siehe Abschnitt „Evaluation“
 
 python3 tools/check_world_connectivity.py     # Offline-Check des Generators (nur numpy)
 ```
@@ -64,6 +67,61 @@ python3 tools/check_world_connectivity.py     # Offline-Check des Generators (nu
   oder `exhausted` (Team 15 Sim-s ohne Ziel). `exhausted`-Welten kopiert der Runner nach
   `worlds/`, damit sie mit `--world` wiederholbar sind.
 - Beenden mit `Ctrl+C`; überlebt Gazebo das: `pkill -9 -f gz`.
+
+## Evaluation
+
+Versuchsplan für Studienbericht 2: RL nur auf 8 × 8 trainieren, dann Classic und eingefrorenes RL
+(`--eval`) auf denselben 8 × 8- (ID) und 12 × 12-Welten (OOD) vergleichen.
+
+| Schritt | Methode | Größe | Episoden | `--seed` |
+|---|---|---|---|---|
+| Training | RL (lernt) | 8 × 8 | 150 | 1 |
+| Eval ID | Classic, RL `--eval` | 8 × 8 | 30 je Methode | 2 |
+| Eval OOD | Classic, RL `--eval` | 12 × 12 | 30 je Methode | 3 |
+
+- **Anzahl:** 30 Welten je Konfiguration (Mittelwert + Streuung). ε fällt um 0,98 pro Episode und
+  erreicht seinen Boden erst nach ca. 150 Episoden, daher 150 Trainingsepisoden.
+- **Gleiche Welten:** `--seed N` macht die Weltfolge reproduzierbar (Episode *k* hängt nur von
+  Seed und *k* ab). Gleicher Seed und gleiche `--world-size` ergeben für beide Methoden dieselben
+  Welten (gepaarter Vergleich). Verschiedene Seeds sichern getrennte Trainings- und Evalwelten.
+- **Eingefroren:** `--eval` (nur `--mode rl`) lädt das Modell, ε = 0, kein Replay, kein Training,
+  kein ε-Decay, kein Speichern; `rl_data/` bleibt unverändert. Ohne Modell bricht der Start ab.
+
+```bash
+# 0) Sauberer Start: altes Modell wegsperren (nicht löschen); SLAM_RL_DATA_DIR darf nicht gesetzt sein
+mv rl_data rl_data_old
+
+# 1) Training: nur 8x8, Seed 1 (nicht unterbrechen; bei Codeänderung rl_data/ entfernen und neu starten)
+python3 training_runner.py --mode rl --episodes 150 --headless --randomize-worlds \
+    --world-size 8 --seed 1 --save-worlds --sim-speed 4
+
+# 2) Eval 8x8, Seed 2 (gleiche Welten für beide Methoden)
+python3 training_runner.py --mode classic --episodes 30 --headless --randomize-worlds \
+    --world-size 8 --seed 2 --save-worlds
+python3 training_runner.py --mode rl --eval --episodes 30 --headless --randomize-worlds \
+    --world-size 8 --seed 2 --save-worlds
+
+# 3) Eval 12x12, Seed 3
+python3 training_runner.py --mode classic --episodes 30 --headless --randomize-worlds \
+    --world-size 12 --seed 3 --save-worlds
+python3 training_runner.py --mode rl --eval --episodes 30 --headless --randomize-worlds \
+    --world-size 12 --seed 3 --save-worlds
+
+# 4) Auswertung (nur die Eval-CSVs übergeben, keine Trainings- oder Altläufer)
+python3 tools/analyze_results.py results/*-classic-*.csv results/*-rl-eval-*.csv
+```
+
+- **Archivierung:** `--save-worlds` legt die Welten unter zufälligen IDs in `worlds/` ab. Nach
+  jedem Lauf in getrennte Ordner verschieben (`worlds/train_8/`, `worlds/eval_8/`,
+  `worlds/eval_12/`); die Seeds erzeugen sie ohnehin reproduzierbar neu.
+- **CSV-Auswahl:** Trainingsläufe heißen `…-rl-…` und gehören nicht in die Auswertung. Fehlgeschlagene
+  oder alte Classic-CSVs vorher aus `results/` entfernen oder die Dateien einzeln angeben.
+- **Ausgabe:** `results/analysis/` mit `summary.csv`, `ratio.csv`, `ratio_change.csv` und den Plots
+  `completion_time.png`, `success_rate.png`, `time_ratio.png`. Kernergebnis ist das
+  RL/Classic-Zeitverhältnis je Größe und seine Änderung von 8 → 12 (Bootstrap-95 %-KI), nicht die
+  absoluten Zeiten. Schließt das KI bei 12 × 12 die 1,0 ein, mehr Evalwelten (neuer Seed) ergänzen.
+- **Code testen:** vor dem echten Training mit Wegwerf-Verzeichnis, z. B.
+  `SLAM_RL_DATA_DIR=/tmp/rl_scratch python3 training_runner.py --mode rl --episodes 3 --headless`.
 
 ## Tests
 
@@ -143,7 +201,8 @@ Begründungen stehen als kurzer Kommentar im Code.
 
 | Datei | Inhalt |
 |---|---|
-| `training_runner.py` | Episoden-Loop: Welt erzeugen/wiederverwenden, Launch mit `SLAM_WORLD_FILE`/`SLAM_SIM_SPEED`, auf `/tmp/slam_episode_done` warten, Prozesse beenden, CSV schreiben. |
+| `training_runner.py` | Episoden-Loop: Welt erzeugen/wiederverwenden, Launch mit `SLAM_WORLD_FILE`/`SLAM_SIM_SPEED`, auf `/tmp/slam_episode_done` warten, Prozesse beenden, CSV schreiben (Spalten u. a. `elapsed_s`, `reason`, `world_size`, `distribution` = ID für 8 m / OOD sonst). `--eval` (nur `--mode rl`) startet den RL-Explorer eingefroren, CSV heißt dann `…-rl-eval-…`; `--seed` macht die Weltfolge reproduzierbar. |
+| `tools/analyze_results.py` | Stdlib (+ optional matplotlib): liest Ergebnis-CSVs, schreibt nach `results/analysis/` Tabellen (`summary.csv`, `ratio.csv`, `ratio_change.csv`) und Plots (`completion_time`, `success_rate`, `time_ratio`): Zeit/Erfolgsrate je (Methode, Größe), RL/Classic-Verhältnis je Größe samt Änderung 8→12 (Bootstrap-95 %-KI). |
 | `tools/check_world_connectivity.py` | Offline (numpy): Konnektivität und Spawn-Erreichbarkeit für beide Größen. |
 | `tools/profile_frontiers.py` | Benchmark der Frontier-Pipeline (System-Python, sourced); überschreibt `/tmp/slam_world_meta.json`. |
 | `tools/dump_map.py` | Speichert alle 10 s die gemergte `/map` + Roboterzellen als `.npz` (laufende Sim, sourced). |

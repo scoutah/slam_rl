@@ -11,6 +11,7 @@ import csv
 import io
 import json
 import os
+import random
 import re
 import shutil
 import signal
@@ -32,6 +33,7 @@ EPISODE_FILE = Path('/tmp/slam_episode_done')
 SIM_ELAPSED_FILE = Path(str(EPISODE_FILE) + '.sim_s')
 SHUTDOWN_GRACE = 15      # seconds to wait for ros2 launch to exit cleanly
 INTER_EPISODE_PAUSE = 3  # seconds to wait after shutdown before next launch
+TRAIN_WORLD_SIZE = 8.0   # the RL policy is trained on this edge length (in-distribution)
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 RESULTS_DIR = PROJECT_ROOT / 'results'
@@ -97,6 +99,7 @@ def prepare_world(
     run_id: str,
     save: bool = False,
     world_size: float | None = None,
+    seed: int | None = None,
 ) -> Path:
     """
     Return the path to the .sdf world file to use for this run.
@@ -105,7 +108,8 @@ def prepare_world(
     Otherwise generate a new random world via tb3_slam.utils, with edge
     length *world_size* (generator default if None).
     When *save* is True, persist to worlds/<run_id>.sdf; otherwise
-    write to /tmp/ (ephemeral).
+    write to /tmp/ (ephemeral). With *seed*, the world is the one for episode 1
+    of that seed (see :func:`seed_world_rng`).
     """
     if world_arg:
         p = Path(world_arg).resolve()
@@ -122,12 +126,30 @@ def prepare_world(
         world_path = WORLDS_DIR / f'{run_id}.sdf'
     else:
         world_path = Path(f'/tmp/slam_world_{run_id}.sdf')
+    seed_world_rng(seed, 1)
     success, _ = generate_random_world(str(world_path), world_size or DEFAULT_WORLD_SIZE)
     if not success:
         print('[runner] ERROR: world generation failed', file=sys.stderr)
         sys.exit(1)
     print(f'[runner] World saved to {world_path}')
     return world_path
+
+
+def seed_world_rng(seed: int | None, episode: int) -> None:
+    """Make the next generated world depend only on (*seed*, *episode*).
+
+    Running two methods with the same ``--seed`` and ``--randomize-worlds``
+    therefore gives both the same world sequence. No-op without a seed.
+    """
+    if seed is not None:
+        random.seed(f'{seed}-{episode}')
+
+
+def distribution_label(world_size: float | None) -> str:
+    """``ID`` for the training size, ``OOD`` for any other; empty if unknown."""
+    if world_size is None:
+        return ''
+    return 'ID' if abs(world_size - TRAIN_WORLD_SIZE) < 1e-6 else 'OOD'
 
 
 def read_world_size(world_file: Path) -> float | None:
@@ -210,7 +232,7 @@ def append_result(
             if write_header:
                 writer.writerow(['timestamp', 'episode', 'mode', 'reason',
                                  'elapsed_s', 'coverage', 'world', 'world_size',
-                                 'wall_s', 'sim_speed'])
+                                 'wall_s', 'sim_speed', 'distribution'])
             writer.writerow([
                 datetime.now().isoformat(timespec='seconds'),
                 episode,
@@ -222,6 +244,7 @@ def append_result(
                 world_size if world_size is not None else '',
                 f'{wall_s:.1f}' if wall_s is not None else '',
                 f'{sim_speed:g}',
+                distribution_label(world_size),
             ])
     except Exception as exc:
         print(f'[runner] ERROR writing result to {result_file}: {exc}', file=sys.stderr)
@@ -237,6 +260,7 @@ def build_launch_cmd(
     threshold: float,
     headless: bool,
     rviz: bool = True,
+    rl_eval: bool = False,
 ) -> list[str]:
     # The episode timeout is derived from the world size by episode_manager
     # (issue #10) and is deliberately not configurable here.
@@ -246,6 +270,8 @@ def build_launch_cmd(
         f'episode_file:={episode_file}',
         f'coverage_threshold:={threshold}',
     ]
+    if rl_eval:
+        cmd.append('rl_eval:=true')
     if headless:
         cmd.append('headless:=true')
     elif not rviz:
@@ -345,8 +371,11 @@ def run(
     world_size: float | None = None,
     rviz: bool = True,
     sim_speed: float = 1.0,
+    rl_eval: bool = False,
+    seed: int | None = None,
 ) -> None:
-    print(f'[runner] Starting episodic training: mode={mode}, episodes={n_episodes}')
+    print(f'[runner] Starting episodic {"EVALUATION (frozen RL)" if rl_eval else "training"}: '
+          f'mode={mode}, episodes={n_episodes}')
     print(f'         threshold={threshold:.0%}, timeout=auto (world size), '
           f'headless={headless}, sim speed={sim_speed:g}x'
           + (' (unlimited)' if sim_speed == 0 else ''))
@@ -368,6 +397,7 @@ def run(
                 world_file = WORLDS_DIR / f'{ep_id}.sdf'
             else:
                 world_file = Path(f'/tmp/slam_world_{ep_id}.sdf')
+            seed_world_rng(seed, episode)
             success, _ = generate_random_world(str(world_file), world_size or DEFAULT_WORLD_SIZE)
             if not success:
                 print('[runner] ERROR: world generation failed', file=sys.stderr)
@@ -382,7 +412,8 @@ def run(
         env['SLAM_WORLD_FILE'] = str(world_file)
         env['SLAM_SIM_SPEED'] = f'{sim_speed:g}'
 
-        launch_cmd = build_launch_cmd(mode, EPISODE_FILE, threshold, headless, rviz)
+        launch_cmd = build_launch_cmd(mode, EPISODE_FILE, threshold, headless, rviz,
+                                      rl_eval)
         print(f'[runner] Launching: {" ".join(launch_cmd)}')
 
         ep_start = time.time()
@@ -465,7 +496,15 @@ def main() -> None:
                         help='Target Gazebo real-time factor: 1 = real time (default), '
                              '4 = up to 4x faster, 0 = unlimited. The achieved speed is '
                              'CPU-bound; measure it with `gz topic -e -t /stats`.')
+    parser.add_argument('--eval', action='store_true',
+                        help='Evaluate the trained RL model frozen (greedy, no learning, '
+                             'nothing saved); needs --mode rl and a model in rl_data/')
+    parser.add_argument('--seed', type=int, default=None,
+                        help='Seed world generation: the same seed gives the same world '
+                             'sequence for every method (use with --randomize-worlds)')
     args = parser.parse_args()
+    if args.eval and args.mode != 'rl':
+        parser.error('--eval needs --mode rl')
     if args.sim_speed < 0:
         parser.error('--sim-speed must be >= 0')
     if args.world and args.world_size is not None and not args.randomize_worlds:
@@ -480,8 +519,8 @@ def main() -> None:
 
     run_id = uuid.uuid4().hex[:8]
     world_file = prepare_world(args.world, run_id, save=args.save_worlds,
-                               world_size=args.world_size)
-    result_file = make_result_path(args.mode, run_id)
+                               world_size=args.world_size, seed=args.seed)
+    result_file = make_result_path('rl-eval' if args.eval else args.mode, run_id)
 
     try:
         run(
@@ -496,6 +535,8 @@ def main() -> None:
             world_size=args.world_size,
             rviz=not args.no_rviz,
             sim_speed=args.sim_speed,
+            rl_eval=args.eval,
+            seed=args.seed,
         )
     except KeyboardInterrupt:
         print('\n[runner] Interrupted by user.')

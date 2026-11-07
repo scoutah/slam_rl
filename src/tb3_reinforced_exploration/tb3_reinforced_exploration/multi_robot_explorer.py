@@ -57,7 +57,8 @@ class RLExplorer(MultiRobotExplorerNode):
       assignment.
 
     Every episode (also stuck/timeout) is kept; persistence via ``data_dir`` /
-    ``$SLAM_RL_DATA_DIR``.
+    ``$SLAM_RL_DATA_DIR``. With ``eval_mode`` the loaded model is frozen:
+    greedy (ε = 0), no replay, no training, no epsilon decay, no saving.
     """
 
     def __init__(self) -> None:
@@ -71,13 +72,22 @@ class RLExplorer(MultiRobotExplorerNode):
             persist_dir=persist_dir,
         )
         self._learner.load()
+        self._eval_mode = bool(self.declare_parameter('eval_mode', False).value)
+        if self._eval_mode:
+            if not (self._learner.agent_path.exists()
+                    and self._learner.mixer_path.exists()):
+                raise RuntimeError(
+                    f'eval_mode needs a trained model, none in {persist_dir}')
+            self._learner.freeze()
         self._recorder = JointEpisodeRecorder()
         self._committed = False
 
         self.create_timer(2.0, self._watch_episode_file)
 
         self.get_logger().info(
-            f'RLExplorer (QMIX/CTDE) ready – e={self._learner.epsilon:.3f}, '
+            f'RLExplorer (QMIX/CTDE) ready – '
+            f'{"EVAL (frozen, greedy)" if self._eval_mode else "training"}, '
+            f'e={self._learner.epsilon:.3f}, '
             f'replay={len(self._learner.replay)}, '
             f'device={self._learner.device}, persist={persist_dir}'
         )
@@ -134,7 +144,7 @@ class RLExplorer(MultiRobotExplorerNode):
         for name, c in choices.items():
             goals[name] = Goal(x=c.x, y=c.y, group_size=c.group_size)
 
-        if choices:
+        if choices and not self._eval_mode:
             options = {n: obs for n, (obs, _) in picked.items()}
             actions = {n: obs[idx] for n, (obs, idx) in picked.items()}
             for name in busy:
@@ -273,6 +283,11 @@ class RLExplorer(MultiRobotExplorerNode):
         if not ep.exists():
             return
         reason = ep.read_text().strip()
+        if self._eval_mode:
+            # Frozen model: no learning step, no epsilon decay, no checkpoint.
+            self._committed = True
+            self.get_logger().info(f'[rl] Episode ended ({reason}) – eval, nothing saved')
+            return
         final_cov = (self._coverage(self._latest_map)
                      if self._latest_map is not None else 0.0)
         self._learn(self._recorder.close(final_cov, self._now()))

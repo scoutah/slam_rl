@@ -218,7 +218,10 @@ class RLExplorer(MultiRobotExplorerNode):
     # Centralised training (QMIX)
     # ------------------------------------------------------------------
 
-    def _coverage(self, merged_map) -> float:
+    def _coverage_now(self, merged_map) -> float:
+        # NB: not ``_coverage`` – the base node stores a float in
+        # ``self._coverage`` from every map callback, which would shadow a
+        # method of that name and raise "'float' object is not callable".
         if self._expected_cells <= 0:
             return 0.0
         coverage, _ = check_coverage(merged_map, self._expected_cells)
@@ -245,7 +248,7 @@ class RLExplorer(MultiRobotExplorerNode):
             if cands is None:
                 cands = self.candidates_for(robot)
             groups.update(c.frontier_cells for c in cands)
-        coverage = self._coverage(merged_map)
+        coverage = self._coverage_now(merged_map)
         state = make_global_state(
             coverage=coverage,
             robot_positions=[(r.x, r.y) for r in robots],
@@ -290,7 +293,7 @@ class RLExplorer(MultiRobotExplorerNode):
             self._committed = True
             self.get_logger().info(f'[rl] Episode ended ({reason}) – eval, nothing saved')
             return
-        final_cov = (self._coverage(self._latest_map)
+        final_cov = (self._coverage_now(self._latest_map)
                      if self._latest_map is not None else 0.0)
         self._learn(self._recorder.close(final_cov, self._now()))
         # Guarded by _committed, so epsilon decays exactly once per episode.

@@ -45,12 +45,13 @@ def test_tf_relay_is_viz_only(monkeypatch):
     assert relay.condition is not None and not relay.condition.evaluate(context)
 
 
-def test_spawn_transforms_stay_on_global_tf_static(monkeypatch):
-    """map->ns/map lives on global /tf_static; goals are converted to ns/map instead."""
+def test_spawn_transforms_on_global_and_robot_tf_static(monkeypatch):
+    """map->ns/map is on global /tf_static (explorer) and on /<ns>/tf_static (Nav2)."""
     module = _launch_module()
     monkeypatch.setattr(module, 'Node', lambda **kwargs: kwargs)
     nodes = module.map_merge_stack([(0.0, -3.0), (1.0, -3.0)], 8.0, True)
     transforms = [node for node in nodes if node['executable'] == 'static_transform_publisher']
-    assert len(transforms) == 2
-    for node in transforms:
-        assert not node.get('remappings')
+    assert len(transforms) == 4
+    assert len([n for n in transforms if not n.get('remappings')]) == 2
+    robot_tree = sorted(n['remappings'][0][1] for n in transforms if n.get('remappings'))
+    assert robot_tree == ['/r1/tf_static', '/r2/tf_static']

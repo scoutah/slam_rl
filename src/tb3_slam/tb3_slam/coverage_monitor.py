@@ -13,7 +13,7 @@ import numpy as np
 
 from tb3_slam.utils import load_world_size, WORLD_META_FILE
 
-DEFAULT_COVERAGE_THRESHOLD: float = 0.99
+DEFAULT_COVERAGE_THRESHOLD: float = 0.97
 
 EPISODE_TIMEOUT_BY_WORLD_SIZE: dict[float, float] = {
     8.0: 600.0,
@@ -23,7 +23,7 @@ _TIMEOUT_PER_AREA_S: float = EPISODE_TIMEOUT_BY_WORLD_SIZE[8.0] / (8.0 * 8.0)
 
 
 def timeout_for_world_size(world_size: float) -> float:
-    """Episode wall-clock timeout (seconds) appropriate for a square world.
+    """Episode timeout (simulation seconds) appropriate for a square world.
 
     Uses the tuned per-size budget for the study sizes (8, 12) and falls back to
     an area-proportional estimate for any other size.

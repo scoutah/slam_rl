@@ -38,6 +38,8 @@ from tb3_slam.utils import (
     generate_random_world,
     load_spawns,
     load_world_size,
+    sim_speed_from_env,
+    speed_up_world,
     WORLD_META_FILE,
     world_meta_path,
 )
@@ -52,16 +54,15 @@ CARTOGRAPHER_LUA = 'turtlebot3_lds_2d.lua'
 
 # Each robot runs spawn→bridge→RSP→Cartographer→startup-spin in parallel; Nav2 is
 # then brought up per robot via nav2_slim.launch.py (only the 5 nodes the explorer
-# uses — see that file). The two Nav2 bringups run near-parallel but with a small
-# per-robot configure offset (NAV2_BASE_DELAY + i*NAV2_CONFIGURE_OFFSET) so their
-# lifecycle change_state phases never overlap — that overlap was the sole cause of
-# r2's intermittent change_state stall. One nav2_gate process per robot blocks on
+# uses — see that file). The Nav2 bringups run one after another (r2's starts when
+# r1's nav2_gate exits) so lifecycle change_state calls never overlap — that
+# overlap made r2's bringup hang. One nav2_gate process per robot blocks on
 # that robot's navigate_to_pose; the explorer launches (OnProcessExit countdown)
 # the instant the last gate exits, i.e. when both stacks are active — no fixed
 # explorer delay.
 #
 # Pre-Nav2 nodes use short fixed timers (no lifecycle race): RSP at 2 s,
-# Cartographer at 5 s, startup spin at 6 s; r1 Nav2 at 6 s, r2 at 10 s.
+# Cartographer at 5 s, startup spin at 6 s; r1 Nav2 at 6 s, r2 once r1 is active.
 GATE_TIMEOUT_S = 120.0  # nav2_gate gives up (exit 1) if Nav2 never comes up
 
 
@@ -99,6 +100,9 @@ def prepare_world(world_size: float) -> tuple[str, list[tuple[float, float]]]:
     # The generator writes both robot spawns (side by side at the room edge,
     # scale with world size) into the world metadata; load_spawns falls back
     # to the default geometry if a pre-made world has no fresh metadata.
+    # SLAM_SIM_SPEED (target real-time factor, 0 = unlimited) patches only the
+    # physics timing into a /tmp copy; the metadata above is unaffected.
+    world_file = speed_up_world(world_file, sim_speed_from_env())
     return world_file, load_spawns(WORLD_META_FILE)
 
 
@@ -130,7 +134,8 @@ def write_robot_configs(ns: str, out_dir: Path) -> dict[str, str]:
     nav2_src = Path(get_package_share_directory('nav2_bringup')) / 'params' / 'nav2_params.yaml'
     nav2 = robot_dir / 'nav2_params.yaml'
     nav2.write_text(yaml.safe_dump(
-        namespace_nav2_params(yaml.safe_load(nav2_src.read_text()), ns), sort_keys=False,
+        namespace_nav2_params(yaml.safe_load(nav2_src.read_text()), ns, MERGED_MAP_FRAME),
+        sort_keys=False,
     ))
 
     return {
@@ -216,11 +221,13 @@ def robot_stack(ns: str, spawn: tuple[float, float], configs: dict[str, str],
         output='log',
     )
 
-    # Publishes TwistStamped for 12.5 s (125 msgs @10 Hz, 0.5 rad/s ≈ one turn)
-    # so Cartographer can map free cells before the explorer looks for frontiers.
+    # Publishes TwistStamped for 12.5 sim-seconds (125 msgs @10 Hz, 0.5 rad/s ≈
+    # one turn) so Cartographer can map free cells before the explorer looks for
+    # frontiers. --use-sim-time keeps it one turn regardless of the sim speed.
     startup_spin = ExecuteProcess(
         cmd=[
             'ros2', 'topic', 'pub',
+            '--use-sim-time',
             '--rate', '10',
             '--times', '125',
             topic(ns, 'cmd_vel'),
@@ -310,11 +317,13 @@ def map_merge_stack(spawns: list[tuple[float, float]], world_size: float,
             'world_size': float(world_size),
         }],
     )
+    # The same offsets also go onto each robot's own /<ns>/tf_static so Nav2's
+    # global costmap (frame ``map``) can resolve map -> <ns>/map.
     static_tfs = [
         Node(
             package='tf2_ros',
             executable='static_transform_publisher',
-            name=f'static_tf_{ns}_map',
+            name=f'static_tf_{ns}_map{suffix}',
             arguments=[
                 '--x', str(x), '--y', str(y), '--z', '0',
                 '--yaw', '0', '--pitch', '0', '--roll', '0',
@@ -322,9 +331,14 @@ def map_merge_stack(spawns: list[tuple[float, float]], world_size: float,
                 '--child-frame-id', frame(ns, 'map'),
             ],
             parameters=[{'use_sim_time': use_sim_time}],
+            remappings=remap,
             output='log',
         )
         for ns, (x, y) in zip(ROBOT_NAMESPACES, spawns)
+        for suffix, remap in (
+            ('', []),
+            ('_robot_tree', [('/tf_static', topic(ns, 'tf_static'))]),
+        )
     ]
     return [*static_tfs, merge]
 
@@ -362,7 +376,7 @@ def generate_launch_description():
     rviz = LaunchConfiguration('rviz', default='true')
     exploration_mode = LaunchConfiguration('exploration_mode', default='classic')
     episode_file = LaunchConfiguration('episode_file', default='/tmp/slam_episode_done')
-    coverage_threshold = LaunchConfiguration('coverage_threshold', default='0.99')
+    coverage_threshold = LaunchConfiguration('coverage_threshold', default='0.97')
     world_size = LaunchConfiguration('world_size', default=str(DEFAULT_WORLD_SIZE))
 
     ros_gz_sim = get_package_share_directory('ros_gz_sim')
@@ -406,28 +420,29 @@ def generate_launch_description():
             pre_nav2_actions += pre
             nav2_by_ns[ns] = nav2
 
-        # Nav2 bringups run (almost) in parallel for speed, but their lifecycle
-        # *configure* phases are decoupled by a small per-robot offset so they
-        # never issue change_state concurrently — that overlap was the only
-        # cause of r2's intermittent change_state stall, and it is just the
-        # first few seconds of each bringup, not the whole thing. Waiting for
-        # r1 to be fully active (the earlier serial design) needlessly delayed
-        # r2 by ~25 s; a small offset removes the race at near-zero cost.
+        # Nav2 bringups run strictly one after another: r1's starts on a timer,
+        # every further robot's when the previous robot's nav2_gate exits, i.e.
+        # once that Nav2 is fully active. Concurrent lifecycle change_state calls
+        # make a service response get lost and the later robot's bringup hangs
+        # forever (seen with r2 stuck in "Configuring planner_server"). A fixed
+        # stagger was not enough: under load r1's activation slid into r2's
+        # configure phase. The cost is r2's Nav2 coming up after r1's.
         #
-        # The explorer still starts on a real readiness signal: one nav2_gate
-        # per robot blocks on that robot's navigate_to_pose, and the explorer
+        # The explorer starts on a real readiness signal: one nav2_gate per
+        # robot blocks on that robot's navigate_to_pose, and the explorer
         # launches once *both* gates have exited (whichever finishes last).
         NAV2_BASE_DELAY = 6.0         # r1 Nav2 right after Cartographer (5 s) sets up map->odom TF
-        NAV2_CONFIGURE_OFFSET = 4.0   # stagger per robot so configure phases don't overlap
 
         chain: list = []
-        gates: list[ExecuteProcess] = []
+        gates: list[ExecuteProcess] = [nav2_gate_process(ns) for ns in ROBOT_NAMESPACES]
         for i, ns in enumerate(ROBOT_NAMESPACES):
-            chain.append(TimerAction(
-                period=NAV2_BASE_DELAY + i * NAV2_CONFIGURE_OFFSET,
-                actions=[nav2_by_ns[ns]],
-            ))
-            gates.append(nav2_gate_process(ns))
+            if i == 0:
+                chain.append(TimerAction(period=NAV2_BASE_DELAY, actions=[nav2_by_ns[ns]]))
+            else:
+                chain.append(RegisterEventHandler(OnProcessExit(
+                    target_action=gates[i - 1],
+                    on_exit=[nav2_by_ns[ns]],
+                )))
 
         # Start all gates immediately (they just block on their action server),
         # and launch the explorer when the last one still running exits. A tiny

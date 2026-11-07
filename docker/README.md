@@ -23,6 +23,9 @@ docker compose run --rm train --mode classic --episodes 20 --headless
 # Run the RL agent
 docker compose run --rm train --mode rl --episodes 50 --headless
 
+# Same, but Gazebo up to 4x faster than real time (CPU-bound; 0 = unlimited)
+docker compose run --rm train --mode rl --episodes 50 --headless --sim-speed 4
+
 # Interactive shell (for colcon build, tests, debugging)
 docker compose run --rm dev
 ```

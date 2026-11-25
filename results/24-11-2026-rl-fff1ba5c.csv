@@ -1,0 +1,11 @@
+timestamp;episode;mode;reason;elapsed_s;coverage;world;world_size;wall_s;sim_speed;distribution
+2026-11-24T21:08:27;1;rl;coverage=97.5%;458.0;0.9750;fff1ba5c.sdf;8.0;203.2;4;ID
+2026-11-24T21:10:04;2;rl;coverage=97.9%;220.5;0.9790;3359ae79.sdf;8.0;93.1;4;ID
+2026-11-24T21:11:57;3;rl;coverage=98.0%;262.0;0.9800;f06dee8d.sdf;8.0;109.1;4;ID
+2026-11-24T21:14:34;4;rl;exhausted (coverage=94.4%);301.0;0.9440;1e9731f9.sdf;8.0;138.1;4;ID
+2026-11-24T21:16:37;5;rl;coverage=98.9%;300.0;0.9890;74133a00.sdf;8.0;119.1;4;ID
+2026-11-24T21:18:35;6;rl;coverage=98.8%;235.0;0.9880;ff889296.sdf;8.0;113.1;4;ID
+2026-11-24T21:22:08;7;rl;stuck (coverage=81.3%);477.0;0.8130;84ebfbd5.sdf;8.0;209.2;4;ID
+2026-11-24T21:24:25;8;rl;exhausted (coverage=94.2%);300.0;0.9420;447d9aec.sdf;8.0;133.2;4;ID
+2026-11-24T21:26:25;9;rl;coverage=99.4%;269.5;0.9940;593298b0.sdf;8.0;116.1;4;ID
+2026-11-24T21:30:00;10;rl;exhausted (coverage=96.1%);479.0;0.9610;2a83f607.sdf;8.0;210.2;4;ID

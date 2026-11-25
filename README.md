@@ -115,7 +115,9 @@ python3 tools/analyze_results.py results/*-classic-*.csv results/*-rl-eval-*.csv
   zufälligen IDs im jeweiligen Ordner ab: `worlds/train_8/`, `worlds/eval_8/`, `worlds/eval_12/`
   (getrennt, damit ID/OOD nachvollziehbar bleibt). Die Seeds erzeugen sie zudem reproduzierbar neu;
   Replay einer gespeicherten Welt: `--world worlds/eval_12/<id>.sdf`. Zum Archivieren
-  `results/`, `worlds/` und `rl_data/` (inkl. `training_log.csv`, `snapshots/`) zusammen sichern.
+  `results/`, `worlds/` und `rl_data/` (inkl. `training_log.csv`, `snapshots/`) zusammen sichern;
+  das Training (`worlds/train_8/`, Gewichte, Log, Snapshots) und `results/` liegen bereits in Git,
+  `joint_replay.pkl` bewusst nicht (reproduzierbar, 1,4 MB).
 - **Nur 8 × 8 gesehen:** Das Training läuft ausschließlich mit `--world-size 8` (`worlds/train_8/`
   enthält nur 8-m-Welten, prüfbar über die `.meta.json`); die Evaluation lädt das Modell eingefroren
   (`--eval`, `rl_data/` bleibt unverändert, `snapshots/` und `training_log.csv` wachsen nicht).
@@ -230,4 +232,4 @@ Begründungen stehen als kurzer Kommentar im Code.
 - `/tmp/slam_world_speed.sdf` — Weltkopie mit angepasstem Physik-Timing (nur bei `SLAM_SIM_SPEED` ≠ 1).
 - `/tmp/slam_map_dump/map_NNN.npz` — Ausgabe von `tools/dump_map.py`.
 - `results/<dd-mm-yyyy>-<mode>-<runid>.csv` — `;`-getrennt: `timestamp, episode, mode, reason, elapsed_s` (Sim-s)`, coverage, world, world_size, wall_s, sim_speed`.
-- `worlds/`, `results/`, `rl_data/` sind gitignored.
+- **In Git versioniert** (Ergebnisse des 8×8-Trainings, 150 Episoden): `worlds/train_8/` (140 Welten, SDF + `.meta.json`), `results/` (komplett, neue CSVs also auch), `rl_data/{agent.pt,mixer.pt,qmix_meta.pkl,training_log.csv}` und `rl_data/snapshots/`. Alles andere unter `worlds/` und `rl_data/` (u. a. `joint_replay.pkl`, `plots/`, `worlds/eval_*`) sowie `build/`, `install/`, `log/` ist gitignored; Details in `.gitignore`. Eval-Welten bei Bedarf dort freigeben.

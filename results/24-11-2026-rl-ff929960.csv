@@ -1,0 +1,11 @@
+timestamp;episode;mode;reason;elapsed_s;coverage;world;world_size;wall_s;sim_speed;distribution
+2026-11-24T17:25:13;1;rl;exhausted (coverage=96.6%);490.0;0.9660;ff929960.sdf;8.0;217.2;4;ID
+2026-11-24T17:27:32;2;rl;coverage=97.8%;286.0;0.9780;109196bd.sdf;8.0;135.2;4;ID
+2026-11-24T17:29:47;3;rl;stuck (coverage=83.5%);313.0;0.8350;a8ae2ba8.sdf;8.0;130.1;4;ID
+2026-11-24T17:32:15;4;rl;exhausted (coverage=96.7%);332.0;0.9670;4160d98c.sdf;8.0;144.2;4;ID
+2026-11-24T17:34:48;5;rl;stuck (coverage=81.6%);353.0;0.8160;1b81a4a3.sdf;8.0;149.2;4;ID
+2026-11-24T17:37:31;6;rl;coverage=97.4%;373.0;0.9740;82ffba18.sdf;8.0;159.2;4;ID
+2026-11-24T17:39:39;7;rl;coverage=97.9%;307.5;0.9790;61b87f11.sdf;8.0;124.1;4;ID
+2026-11-24T17:41:33;8;rl;coverage=97.1%;267.0;0.9710;6d353107.sdf;8.0;110.1;4;ID
+2026-11-24T17:44:19;9;rl;stuck (coverage=82.0%);371.0;0.8200;58c6ac73.sdf;8.0;162.2;4;ID
+2026-11-24T17:47:02;10;rl;coverage=98.2%;373.0;0.9820;1ffdcccb.sdf;8.0;158.2;4;ID

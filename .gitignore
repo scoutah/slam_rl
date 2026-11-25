@@ -2,9 +2,15 @@ build/
 install/
 log/
 
-worlds/
-results/
-rl_data/
+# Tracked: worlds/train_8, results, final RL weights + snapshots + training log
+worlds/*
+!worlds/train_8/
+rl_data/*
+!rl_data/agent.pt
+!rl_data/mixer.pt
+!rl_data/qmix_meta.pkl
+!rl_data/training_log.csv
+!rl_data/snapshots/
 
 .venv/
 .vscode

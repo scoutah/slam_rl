@@ -172,8 +172,8 @@ Begründungen stehen als kurzer Kommentar im Code.
 
 | Datei | Inhalt |
 |---|---|
-| `launch/sim_slam.launch.py` | Gesamtstack: Welt (generiert oder `SLAM_WORLD_FILE`) → gz-Server (+GUI) + `/clock`-Bridge → pro Roboter parallel Spawn, Bridge, `cmd_vel_relay`, RSP (2 s), Cartographer (5 s), Start-Spin (6 s) → Nav2 **strikt nacheinander** (r1 @6 s, r2 sobald r1s `nav2_gate` endet; parallele Lifecycle-Aufrufe hängen) → Explorer, sobald das letzte `nav2_gate` endet. `episode_manager`, `map_merger` und die Static-TFs `map→<ns>/map` starten sofort. |
-| `launch/nav2_slim.launch.py` | Schlanker Nav2-Bringup: nur `controller_server`, `planner_server`, `behavior_server`, `bt_navigator`, `velocity_smoother` sind lifecycle-managed (kein `smoother_server`, `route_server`, `collision_monitor`, `waypoint_follower`, `docking_server`). |
+| `launch/sim_slam.launch.py` | Gesamtstack: Welt (generiert oder `SLAM_WORLD_FILE`) → gz-Server (+GUI) + `/clock`-Bridge → pro Roboter parallel Spawn, Bridge, `cmd_vel_relay`, RSP (2 s), Cartographer (5 s), Start-Spin (6 s) → Nav2 **strikt nacheinander** (r1 @6 s, r2 sobald r1s `nav2_gate` endet; `nav2_gate` aktiviert Nav2 selbst) → Explorer, sobald das letzte `nav2_gate` endet. `episode_manager`, `map_merger` und die Static-TFs `map→<ns>/map` starten sofort. |
+| `launch/nav2_slim.launch.py` | Schlanker Nav2-Bringup: nur `controller_server`, `planner_server`, `behavior_server`, `bt_navigator`, `velocity_smoother` (kein `smoother_server`, `route_server`, `collision_monitor`, `waypoint_follower`, `docking_server`) und **kein `lifecycle_manager`** – Konfigurieren/Aktivieren übernimmt `nav2_gate`. |
 | `rviz/sim_slam.rviz` | RViz-Konfiguration. |
 | `tb3_slam/utils.py` | Weltengenerator (`generate_random_world`, BSP-Haus, nur Größen 8/12), `spawn_poses`/`load_spawns`, Metadaten-I/O, Sim-Speed-Patch (`apply_sim_speed`, `speed_up_world`, `sim_speed_from_env`). |
 | `tb3_slam/multi_robot.py` | Namespacing der Upstream-Configs (model.sdf, Bridge, Cartographer-lua, Nav2-Params). Globale Costmap und `bt_navigator` planen auf der gemergten `/map` (Frame `map`), Inflation 0,30 m, damit 1,1-m-Türen passierbar bleiben. Ohne ROS, unit-getestet. |
@@ -186,9 +186,9 @@ Begründungen stehen als kurzer Kommentar im Code.
 | `tb3_slam/multi_robot_explorer.py` | Basisnode `MultiRobotExplorerNode` + Typen (`Goal`, `RobotState`, `FrontierCandidate`, `IdleTracker`). Besitzt alle ROS-I/O: gemergte `/map`, TF-Buffer aus `/<ns>/tf[_static]`, Zielversand im `<ns>/map`-Frame, Zielüberwachung (Timeout 45 s, kein Fortschritt 8 s → Recovery: Costmaps leeren → 0,3 m zurück → 90° drehen), Pfadkosten-Cache, Marker auf `/frontiers_viz`, `exhausted`-Erkennung. Hilfen für Subklassen: `candidates_for`, `path_cost`; Strategie über `select_goals` (oder eigenes `_decide`). |
 | `tb3_slam/coverage_monitor.py` | `timeout_for_world_size`, erwartete Zellen, Coverage. |
 | `tb3_slam/episode_manager.py` | Beendet die Episode auf der gemergten `/map` (Coverage, stuck, Timeout; erste 15 s ignoriert); schreibt `/tmp/slam_episode_done` (überschreibt keine vorhandene Datei) und jede Sekunde `….sim_s`; publiziert `/episode/coverage`. |
-| `tb3_slam/cmd_vel_relay.py` | `/<ns>/cmd_vel_smoothed` (Twist) → `/<ns>/cmd_vel` (TwistStamped für die gz-Bridge). |
+| `tb3_slam/cmd_vel_relay.py` | `/<ns>/cmd_vel_smoothed` (Twist) → `/<ns>/cmd_vel` (TwistStamped für die gz-Bridge); Kollisionsschutz: begrenzt die Vorwärts-/Rückwärtsgeschwindigkeit anhand von `/<ns>/scan` (Mate und Wände), stoppt bei fehlendem Scan. |
 | `tb3_slam/tf_relay.py` | Nur für RViz: spiegelt `/<ns>/tf` auf globales `/tf`. Der Explorer braucht es nicht. |
-| `tb3_slam/nav2_gate.py` | Blockiert auf `/<ns>/navigate_to_pose`; Exit 0 bei aktivem Nav2, 1 bei Timeout. Taktgeber für Nav2-Reihenfolge und Explorer-Start. |
+| `tb3_slam/nav2_gate.py` | Ersetzt Nav2s `lifecycle_manager`: fährt die Nav2-Knoten (`multi_robot.NAV2_LIFECYCLE_NODES`) per configure/activate hoch, mit Timeouts und Zustands-Neuabfrage (Fast DDS verliert unter Last Lifecycle-Antworten, der `lifecycle_manager` hing dann ewig), wartet auf `/<ns>/navigate_to_pose`; Exit 0 bei aktivem Nav2, 1 bei Timeout. Taktgeber für Nav2-Reihenfolge und Explorer-Start. |
 | `test/` | Unit-Tests ohne laufende Sim (Generator, Metadaten, Merging, Frontier-Pipeline inkl. Äquivalenz zur Referenzimplementierung, Namespacing, Launch-Verdrahtung, Sim-Speed, Info-Gain, Footprints). |
 
 ### `src/tb3_exploration`

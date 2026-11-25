@@ -145,9 +145,13 @@ class MapMerger(Node):
 def main(args=None) -> None:
     rclpy.init(args=args)
     node = MapMerger()
-    rclpy.spin(node)
-    node.destroy_node()
-    rclpy.shutdown()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        rclpy.try_shutdown()
 
 
 if __name__ == '__main__':

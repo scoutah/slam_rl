@@ -148,6 +148,11 @@ def candidates_for_robot(
     return candidates
 
 
+def goal_conflicts(goal: Goal, taken: list[Goal], min_separation: float) -> bool:
+    """Return whether ``goal`` lies within ``min_separation`` m of any goal in ``taken``."""
+    return any(math.hypot(goal.x - t.x, goal.y - t.y) < min_separation for t in taken)
+
+
 class IdleTracker:
     """How long the whole team has been without any active goal (sim seconds).
 
@@ -213,6 +218,8 @@ class MultiRobotExplorerNode(Node):
         # episode ends as "exhausted". 0 disables. Must stay below the episode
         # manager's stuck window (90 s) minus the time a last goal can still run.
         self.declare_parameter('exhausted_idle_s', 15.0)
+        # Two robots never get goals closer than this (m): they would meet head-on.
+        self.declare_parameter('min_goal_separation', 1.5)
         self.declare_parameter('data_dir', os.environ.get('SLAM_RL_DATA_DIR', ''))
         self.declare_parameter('cost_cache_ttl', 5.0)
         self.declare_parameter('viz_min_period', 2.0)
@@ -226,6 +233,7 @@ class MultiRobotExplorerNode(Node):
         self._min_progress: float = self.get_parameter('min_progress').value
         self._recovery_timeout: float = self.get_parameter('recovery_timeout').value
         self._exhausted_idle_s: float = self.get_parameter('exhausted_idle_s').value
+        self._min_goal_separation: float = self.get_parameter('min_goal_separation').value
         self._idle = IdleTracker()
         self._ever_dispatched = False
         self._coverage = 0.0
@@ -573,6 +581,16 @@ class MultiRobotExplorerNode(Node):
         if not io.nav_client.server_is_ready():
             self.get_logger().warning(
                 f'[{io.ns}] Nav2 not ready – skipping dispatch', throttle_duration_sec=5.0,
+            )
+            return
+
+        taken = [o.current_goal for o in self._robots.values()
+                 if o is not io and o.goal_active and o.current_goal is not None]
+        if goal_conflicts(goal, taken, self._min_goal_separation):
+            self.get_logger().info(
+                f'[{io.ns}] goal ({goal.x:.2f}, {goal.y:.2f}) dropped – within '
+                f'{self._min_goal_separation:.1f}m of a teammate goal',
+                throttle_duration_sec=5.0,
             )
             return
 

@@ -7,6 +7,7 @@ options; the episode timeout is derived from world size (#10), not a CLI flag.
 """
 
 import argparse
+import contextlib
 import csv
 import io
 import json
@@ -342,7 +343,26 @@ _STALE_PATTERNS = [
     'robot_state_publisher',
     'classic_explorer',
     'rl_explorer',
+    'nav2_gate',
 ]
+
+
+def _clean_fastdds_shm() -> None:
+    """Drop Fast DDS shared-memory segments left by SIGKILLed nodes.
+
+    Stale port/lock files make the next episode's participants fail
+    `open_and_lock_file`, which stalls discovery. `fastdds shm clean` only
+    removes zombie segments, so live participants are not affected. Keep SHM
+    itself enabled: UDP-only transport drops Nav2 lifecycle replies under load.
+    """
+    with contextlib.suppress(OSError, subprocess.SubprocessError):
+        subprocess.run(
+            ['fastdds', 'shm', 'clean'],
+            check=False,
+            timeout=30,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
 
 
 def _kill_stale_ros_processes() -> None:
@@ -353,6 +373,7 @@ def _kill_stale_ros_processes() -> None:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
+    _clean_fastdds_shm()
 
 
 # ---------------------------------------------------------------------------
@@ -411,6 +432,7 @@ def run(
         env = os.environ.copy()
         env['SLAM_WORLD_FILE'] = str(world_file)
         env['SLAM_SIM_SPEED'] = f'{sim_speed:g}'
+        _clean_fastdds_shm()
 
         launch_cmd = build_launch_cmd(mode, EPISODE_FILE, threshold, headless, rviz,
                                       rl_eval)
@@ -426,7 +448,19 @@ def run(
         )
         start_filtered_readers(proc)
 
-        reason = wait_for_episode_done(EPISODE_FILE, proc)
+        try:
+            reason = wait_for_episode_done(EPISODE_FILE, proc)
+        except KeyboardInterrupt:
+            # The launch runs in its own session (start_new_session), so the
+            # terminal's Ctrl+C never reaches it: tear it down explicitly.
+            print('\n[runner] Interrupted – stopping simulation …')
+            try:
+                kill_launch(proc)
+            except KeyboardInterrupt:  # second Ctrl+C: skip the grace period
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                _kill_stale_ros_processes()
+            raise
         wall_s = time.time() - ep_start
         # Durations are reported in sim seconds so results do not depend on the
         # achieved real-time factor; fall back to wall time if unavailable.

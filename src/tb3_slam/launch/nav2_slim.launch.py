@@ -9,6 +9,14 @@ drive, and velocity_smoother — whose output ``cmd_vel_smoothed`` the repo's
 and it, like route/waypoint/docking and the path smoother, is dropped). Fewer nodes
 through the lifecycle = faster, more reliable activation.
 
+No Nav2 lifecycle_manager is launched (``autostart`` is accepted but unused):
+``nav2_gate`` drives these nodes through
+configure/activate itself, with per-call timeouts and state re-checks. Nav2's
+manager waits forever on each ``change_state`` response, and Fast DDS drops
+such a response when the caller's reply reader is not matched yet under load
+("failed to send response ... client will not receive response") — that hung
+r2's bringup even with the robots serialised.
+
 Drop-in for navigation_launch.py (same launch args: namespace, use_sim_time,
 params_file, autostart, use_respawn, log_level); composition is not supported here.
 """
@@ -22,18 +30,9 @@ from launch_ros.actions import Node, SetParameter
 from launch_ros.descriptions import ParameterFile
 from nav2_common.launch import RewrittenYaml
 
-# Only these go through the lifecycle manager (order = configure/activate order).
-# Everything the explorer never calls (smoother_server, route_server,
-# collision_monitor, waypoint_follower, docking_server) is left out on purpose.
-LIFECYCLE_NODES = [
-    'controller_server',
-    'planner_server',
-    'behavior_server',
-    'bt_navigator',
-    'velocity_smoother',
-]
 
-
+# The nodes below must match tb3_slam.multi_robot.NAV2_LIFECYCLE_NODES, the
+# list (and configure/activate order) nav2_gate brings up.
 def generate_launch_description():
     namespace = LaunchConfiguration('namespace')
     use_sim_time = LaunchConfiguration('use_sim_time')
@@ -82,14 +81,6 @@ def generate_launch_description():
         nav_node('nav2_bt_navigator', 'bt_navigator', 'bt_navigator'),
         nav_node('nav2_velocity_smoother', 'velocity_smoother', 'velocity_smoother',
                  [('cmd_vel', 'cmd_vel_nav')]),
-        Node(
-            package='nav2_lifecycle_manager',
-            executable='lifecycle_manager',
-            name='lifecycle_manager_navigation',
-            output='screen',
-            arguments=['--ros-args', '--log-level', log_level],
-            parameters=[{'autostart': autostart}, {'node_names': LIFECYCLE_NODES}],
-        ),
     ])
 
     ld = LaunchDescription()

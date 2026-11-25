@@ -13,12 +13,16 @@
 # limitations under the License.
 
 from ament_flake8.main import main_with_errors
+from flake8.checker import Manager
 import pytest
 
 
 @pytest.mark.flake8
 @pytest.mark.linter
-def test_flake8():
+def test_flake8(monkeypatch):
+    # flake8 forks one worker per CPU; after the explorer tests the process
+    # holds DDS threads and the forked workers deadlock. Run serially instead.
+    monkeypatch.setattr(Manager, '_job_count', lambda self: 0)
     rc, errors = main_with_errors(argv=[])
     assert rc == 0, \
         'Found %d code style errors / warnings:\n' % len(errors) + \

@@ -309,9 +309,20 @@ class RLExplorer(MultiRobotExplorerNode):
 def main(args=None) -> None:
     rclpy.init(args=args)
     node = RLExplorer()
-    rclpy.spin(node)
-    node.destroy_node()
-    rclpy.shutdown()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        # The runner SIGINTs the stack right after the episode file appears,
+        # often before the 2 s timer fires; flush the pending save here
+        # (no-op if already committed or no episode file exists).
+        try:
+            node._watch_episode_file()
+        except Exception as exc:  # never mask shutdown with a save error
+            node.get_logger().error(f'[rl] final save failed: {exc}')
+        node.destroy_node()
+        rclpy.try_shutdown()
 
 
 if __name__ == '__main__':

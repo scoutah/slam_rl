@@ -54,12 +54,12 @@ CARTOGRAPHER_LUA = 'turtlebot3_lds_2d.lua'
 
 # Each robot runs spawn→bridge→RSP→Cartographer→startup-spin in parallel; Nav2 is
 # then brought up per robot via nav2_slim.launch.py (only the 5 nodes the explorer
-# uses — see that file). The Nav2 bringups run one after another (r2's starts when
-# r1's nav2_gate exits) so lifecycle change_state calls never overlap — that
-# overlap made r2's bringup hang. One nav2_gate process per robot blocks on
-# that robot's navigate_to_pose; the explorer launches (OnProcessExit countdown)
-# the instant the last gate exits, i.e. when both stacks are active — no fixed
-# explorer delay.
+# uses — see that file). nav2_gate, one per robot, drives that robot's Nav2 nodes
+# through configure/activate (retrying lost lifecycle replies, which hung Nav2's
+# own lifecycle_manager) and exits once navigate_to_pose is up. The bringups run
+# one after another (r2's nodes start when r1's gate exits) to keep load low; the
+# explorer launches (OnProcessExit countdown) the instant the last gate exits,
+# i.e. when both stacks are active — no fixed explorer delay.
 #
 # Pre-Nav2 nodes use short fixed timers (no lifecycle race): RSP at 2 s,
 # Cartographer at 5 s, startup spin at 6 s; r1 Nav2 at 6 s, r2 once r1 is active.
@@ -266,6 +266,7 @@ def robot_stack(ns: str, spawn: tuple[float, float], configs: dict[str, str],
             'input_topic': topic(ns, 'cmd_vel_smoothed'),
             'output_topic': topic(ns, 'cmd_vel'),
             'frame_id': frame(ns, 'base_link'),
+            'scan_topic': topic(ns, 'scan'),    # lidar collision guard (teammates, walls)
         }],
     )
 
@@ -283,11 +284,11 @@ def robot_stack(ns: str, spawn: tuple[float, float], configs: dict[str, str],
 
 
 def nav2_gate_process(ns: str) -> ExecuteProcess:
-    """Short-lived process that blocks until ``<ns>``'s Nav2 is active.
+    """Short-lived process that activates ``<ns>``'s Nav2 and exits when it is up.
 
-    Exits 0 the moment ``/<ns>/navigate_to_pose`` is available, exit 1 on
-    timeout. Used to chain the robots' Nav2 bringups (OnProcessExit) so they
-    serialise on a real readiness signal instead of a fixed wall-clock offset.
+    Exits 0 once the lifecycle nodes are active and ``/<ns>/navigate_to_pose``
+    is available, exit 1 on timeout. Used to chain the robots' Nav2 bringups
+    (OnProcessExit) on a real readiness signal instead of a fixed offset.
     """
     return ExecuteProcess(
         cmd=['ros2', 'run', 'tb3_slam', 'nav2_gate',
@@ -428,15 +429,15 @@ def generate_launch_description():
 
         # Nav2 bringups run strictly one after another: r1's starts on a timer,
         # every further robot's when the previous robot's nav2_gate exits, i.e.
-        # once that Nav2 is fully active. Concurrent lifecycle change_state calls
-        # make a service response get lost and the later robot's bringup hangs
-        # forever (seen with r2 stuck in "Configuring planner_server"). A fixed
-        # stagger was not enough: under load r1's activation slid into r2's
-        # configure phase. The cost is r2's Nav2 coming up after r1's.
+        # once that Nav2 is fully active. Lifecycle replies get lost under load
+        # (seen even serialised: r2 stuck in "Configuring behavior_server" under
+        # Nav2's lifecycle_manager), so nav2_gate drives the lifecycle itself with
+        # timeouts and retries; serialising still keeps the CPU/discovery load and
+        # with it the number of lost replies down.
         #
         # The explorer starts on a real readiness signal: one nav2_gate per
-        # robot blocks on that robot's navigate_to_pose, and the explorer
-        # launches once *both* gates have exited (whichever finishes last).
+        # robot activates that robot's Nav2 and waits for navigate_to_pose; the
+        # explorer launches once *both* gates have exited (whichever finishes last).
         NAV2_BASE_DELAY = 6.0         # r1 Nav2 right after Cartographer (5 s) sets up map->odom TF
 
         chain: list = []

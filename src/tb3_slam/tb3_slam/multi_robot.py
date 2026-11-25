@@ -18,6 +18,16 @@ ROBOT_NAMESPACES: tuple[str, ...] = tuple(f'r{i + 1}' for i in range(NUM_ROBOTS)
 # ``<ns>/map`` is a child of it, offset by the robot's spawn pose (yaw 0).
 MERGED_MAP_FRAME: str = 'map'
 
+# Nav2 lifecycle nodes launched per robot (nav2_slim.launch.py), in
+# configure/activate order; nav2_gate drives them through their lifecycle.
+NAV2_LIFECYCLE_NODES: tuple[str, ...] = (
+    'controller_server',
+    'planner_server',
+    'behavior_server',
+    'bt_navigator',
+    'velocity_smoother',
+)
+
 # Gazebo model SDF elements holding topic names and frame ids.
 _SDF_TOPIC_TAGS = ('topic', 'odom_topic', 'tf_topic')
 _SDF_FRAME_TAGS = ('frame_id', 'child_frame_id', 'gz_frame_id')

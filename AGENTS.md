@@ -49,10 +49,12 @@ Three ament_python packages in `src/`; per-file index in the README code map.
 `SLAM_WORLD_FILE` is set) → gz server (+GUI unless headless) + `/clock` bridge → per robot `r1`, `r2`, in
 parallel: spawn, bridge, `cmd_vel_relay`, RSP (2 s), Cartographer (5 s), startup spin (6 s, 12.5 sim-s).
 **Nav2 comes up strictly one robot after the other**: r1's at 6 s, r2's when r1's `nav2_gate` exits.
-Concurrent lifecycle `change_state` calls lose a service response and hang the later robot's bringup
-(r2 stuck in "Configuring planner_server"); a fixed stagger was not enough under load. Nav2 uses
+Under load Fast DDS drops lifecycle `change_state` replies ("failed to send response"), and Nav2's
+`lifecycle_manager` then waits forever (r2 stuck in "Configuring …", even serialised). So there is **no
+`lifecycle_manager`**: each robot's `nav2_gate` configures/activates its Nav2 nodes itself with timeouts,
+re-reading the node state after a lost reply, then waits for `navigate_to_pose`. Nav2 uses
 `nav2_slim.launch.py` (only the 5 nodes the explorer needs; `collision_monitor` is bypassed since
-`cmd_vel_relay` reads `cmd_vel_smoothed`). The explorer launches when the **last** `nav2_gate` exits –
+`cmd_vel_relay` reads `cmd_vel_smoothed` and itself caps linear speed from `/<ns>/scan` so robots cannot drive into each other; the explorer base's `_dispatch` drops goals within `min_goal_separation` 1.5 m of a teammate's active goal). The explorer launches when the **last** `nav2_gate` exits –
 no fixed delay. `episode_manager` and `map_merger` start immediately. `exploration_mode`:
 `classic` → `tb3_exploration/classic_explorer`, `rl` → `tb3_reinforced_exploration/rl_explorer`,
 `none` → bare stack.
